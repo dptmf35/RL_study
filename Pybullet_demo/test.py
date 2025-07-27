@@ -14,7 +14,7 @@ def test_basic_rl():
     print("=== 1단계: 기본 CartPole 환경 테스트 ===")
     
     # 환경 생성
-    env = gym.make('CartPole-v1', render_mode='rgb_array')
+    env = gym.make('CartPole-v1', render_mode='human')
     
     print(f"관측 공간: {env.observation_space}")
     print(f"행동 공간: {env.action_space}")
@@ -48,7 +48,7 @@ def test_pendulum():
     print("\n=== 2단계: Pendulum 연속 제어 환경 ===")
     
     # 연속 제어 환경
-    env = gym.make('Pendulum-v1', render_mode='rgb_array')
+    env = gym.make('Pendulum-v1', render_mode='human')
     
     print(f"관측 공간: {env.observation_space}")
     print(f"행동 공간: {env.action_space}")
@@ -181,4 +181,4 @@ if __name__ == "__main__":
     results = compare_algorithms()
     
     print("\n🎉 입문 과정 완료!")
-    rint("다음 단계: PyBullet 환경으로 이동하세요.")
+    print("다음 단계: PyBullet 환경으로 이동하세요.")
