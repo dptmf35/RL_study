@@ -296,15 +296,15 @@ def advanced_robot_training():
     env.close()
 
 if __name__ == "__main__":
-    print("🤖 PyBullet 로봇 강화학습을 시작합니다!")
-    print("=" * 50)
+    # print("🤖 PyBullet 로봇 강화학습을 시작합니다!")
+    # print("=" * 50)
     
-    # 1. 내장 환경 테스트
-    try_builtin_envs()
+    # # 1. 내장 환경 테스트
+    # try_builtin_envs()
     
-    # 2. 간단한 로봇 학습
-    model, env = train_simple_robot()
-    env.close()
+    # # 2. 간단한 로봇 학습
+    # model, env = train_simple_robot()
+    # env.close()
     
     # 3. 학습된 로봇 테스트
     test_trained_robot()
