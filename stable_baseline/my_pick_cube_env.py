@@ -34,7 +34,7 @@ class MyPickCubeEnv(BaseEnv):
     agent: "PandaAgent"  # type hint
     
     cube_half_size = 0.02
-    goal_height = 0.3  # target lift height
+    goal_height = 0.2  # target lift height (0.3 -> 0.2, easier)
 
     def __init__(self, *args, robot_uids="panda", robot_init_qpos_noise=0.02, **kwargs):
         self.robot_init_qpos_noise = robot_init_qpos_noise
@@ -170,14 +170,14 @@ class MyPickCubeEnv(BaseEnv):
         success = info["success"].float()
 
         reward = (
-            reaching_reward * 1.0
-            + grasp_reward * 2.0
-            + lift_reward * 3.0
-            + success * 5.0
+            reaching_reward * 2.0      # 1.0 -> 2.0 (큐브에 가는 것)
+            + grasp_reward * 5.0       # 2.0 -> 5.0 (잡는 것 강조!)
+            + lift_reward * 5.0        # 3.0 -> 5.0 (들어올리기 강조!)
+            + success * 10.0           # 5.0 -> 10.0 (성공 보너스 증가)
         )
 
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        max_reward = 11.0  # 1 + 2 + 3 + 5
+        max_reward = 22.0  # 2 + 5 + 5 + 10
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward
