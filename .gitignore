@@ -5,6 +5,18 @@ __pycache__/
 *.pyo
 *.pyd
 
+# datafiles
+*.xml
+*.stl
+*.obj
+*.mtl
+*.ply
+*.dae
+*.fbx
+*.blend
+*.zip
+
+
 # Compiled extensions
 *.so
 *.dylib
