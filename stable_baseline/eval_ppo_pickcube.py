@@ -44,6 +44,9 @@ def evaluate_model(model_path: str, num_episodes: int = 10, render: bool = True)
     if render:
         env_kwargs["render_mode"] = "rgb_array"
     
+    # Add reward_mode to env_kwargs
+    env_kwargs["reward_mode"] = "dense"
+    
     eval_env = gym.make("MyPickCube-v0", **env_kwargs)
     max_episode_steps = gym_utils.find_max_episode_steps_value(eval_env)
     
@@ -71,10 +74,12 @@ def evaluate_model(model_path: str, num_episodes: int = 10, render: bool = True)
     episode_successes = []
     current_episode_rewards = np.zeros(env_kwargs['num_envs'])
     episodes_completed = 0
+    step_count = 0
     
     while episodes_completed < num_episodes:
         action, _ = model.predict(obs, deterministic=True)
         obs, rewards, dones, infos = eval_env.step(action)
+        step_count += 1
         
         current_episode_rewards += rewards
         
@@ -84,12 +89,23 @@ def evaluate_model(model_path: str, num_episodes: int = 10, render: bool = True)
                 episode_rewards.append(current_episode_rewards[i])
                 current_episode_rewards[i] = 0
                 
-                # Get success from info
-                if "final_info" in infos:
-                    success = infos["final_info"][i].get("success", False)
+                # Get success from info - ManiSkill stores it directly in infos
+                if "success" in infos:
+                    # Handle both tensor and numpy array
+                    success_val = infos["success"]
+                    if hasattr(success_val, 'cpu'):
+                        success_val = success_val.cpu().numpy()
+                    if hasattr(success_val, '__len__'):
+                        success = bool(success_val[i])
+                    else:
+                        success = bool(success_val)
                     episode_successes.append(success)
+                else:
+                    episode_successes.append(False)
                 
                 episodes_completed += 1
+                print(f"   Episode {episodes_completed}/{num_episodes}: reward={episode_rewards[-1]:.2f}, success={episode_successes[-1]}")
+                
                 if episodes_completed >= num_episodes:
                     break
 
@@ -97,16 +113,25 @@ def evaluate_model(model_path: str, num_episodes: int = 10, render: bool = True)
 
     # Print results
     print("\n" + "=" * 60)
-    print("Evaluation Results:")
+    print("🎯 Evaluation Results:")
     print("=" * 60)
-    print(f"Episodes: {len(episode_rewards)}")
-    print(f"Mean reward: {np.mean(episode_rewards):.2f} ± {np.std(episode_rewards):.2f}")
-    print(f"Min reward: {np.min(episode_rewards):.2f}")
-    print(f"Max reward: {np.max(episode_rewards):.2f}")
+    print(f"Episodes completed: {len(episode_rewards)}")
+    print(f"Total steps: {step_count}")
+    print()
+    print("📊 Rewards:")
+    print(f"  Mean: {np.mean(episode_rewards):.2f} ± {np.std(episode_rewards):.2f}")
+    print(f"  Min:  {np.min(episode_rewards):.2f}")
+    print(f"  Max:  {np.max(episode_rewards):.2f}")
+    print()
     
     if episode_successes:
+        success_count = sum(episode_successes)
         success_rate = np.mean(episode_successes) * 100
-        print(f"Success rate: {success_rate:.1f}%")
+        print("🏆 Success Rate:")
+        print(f"  Successes: {success_count}/{len(episode_successes)}")
+        print(f"  Rate: {success_rate:.1f}%")
+    else:
+        print("⚠️  No success data available")
     
     print("=" * 60)
 

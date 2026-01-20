@@ -20,7 +20,7 @@ from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import Array, GPUMemoryConfig, SimConfig
 
 
-@register_env("MyPickCube-v0", max_episode_steps=200)
+@register_env("MyPickCube-v0", max_episode_steps=300)  # 200 -> 300, more time
 class MyPickCubeEnv(BaseEnv):
     """
     Simple pick cube task with PANDA robot.
@@ -128,7 +128,8 @@ class MyPickCubeEnv(BaseEnv):
         """Check if task is successful"""
         # Success if cube is lifted above goal height and held
         cube_pos = self.cube.pose.p
-        success = cube_pos[:, 2] >= self.goal_height - 0.05
+        # More lenient: goal_height(0.2) - 0.08 = 0.12m (12cm lift is success)
+        success = cube_pos[:, 2] >= self.goal_height - 0.08
         
         return {
             "success": success,
@@ -170,14 +171,14 @@ class MyPickCubeEnv(BaseEnv):
         success = info["success"].float()
 
         reward = (
-            reaching_reward * 2.0      # 1.0 -> 2.0 (큐브에 가는 것)
-            + grasp_reward * 5.0       # 2.0 -> 5.0 (잡는 것 강조!)
-            + lift_reward * 5.0        # 3.0 -> 5.0 (들어올리기 강조!)
-            + success * 10.0           # 5.0 -> 10.0 (성공 보너스 증가)
+            reaching_reward * 1.5      # 2.0 -> 1.5 (reaching 줄이고)
+            + grasp_reward * 4.0       # 5.0 -> 4.0 (grasping 유지)
+            + lift_reward * 10.0       # 5.0 -> 10.0 (LIFTING 대폭 증가! ⭐⭐⭐)
+            + success * 15.0           # 10.0 -> 15.0 (성공 보너스 대폭 증가!)
         )
 
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        max_reward = 22.0  # 2 + 5 + 5 + 10
+        max_reward = 30.5  # 1.5 + 4.0 + 10.0 + 15.0
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

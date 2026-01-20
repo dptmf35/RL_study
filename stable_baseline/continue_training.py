@@ -26,6 +26,7 @@ def main():
         num_envs=32,
         obs_mode="state",
         control_mode="pd_joint_delta_pos",
+        reward_mode="dense",  # Use dense reward! ⭐
         render_mode=None,
         sim_backend="auto",
     )
@@ -40,6 +41,7 @@ def main():
         num_envs=8,
         obs_mode="state",
         control_mode="pd_joint_delta_pos",
+        reward_mode="dense",  # Use dense reward! ⭐
         render_mode="rgb_array",
         sim_backend="auto",
     )

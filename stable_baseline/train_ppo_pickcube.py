@@ -26,6 +26,7 @@ def main():
         num_envs=32,  # parallel environments
         obs_mode="state",
         control_mode="pd_joint_delta_pos",
+        reward_mode="dense",  # Use dense reward! ⭐
         render_mode=None,  # no rendering during training
         sim_backend="auto",  # auto select GPU/CPU
     )
@@ -43,6 +44,7 @@ def main():
         num_envs=8,
         obs_mode="state",
         control_mode="pd_joint_delta_pos",
+        reward_mode="dense",  # Use dense reward! ⭐
         render_mode="rgb_array",  # enable rendering for eval videos
         sim_backend="auto",
     )
@@ -63,7 +65,7 @@ def main():
     model = PPO(
         "MlpPolicy",
         train_env,
-        learning_rate=3e-4,
+        learning_rate=3e-4,# 3e-4 (기본), 1e-4 (안정), 1e-3 (빠름)
         n_steps=256,  # steps per env per update
         batch_size=256,
         n_epochs=10,
@@ -102,7 +104,7 @@ def main():
     print("=" * 60)
     
     model.learn(
-        total_timesteps=500_000,
+        total_timesteps=750_000,
         callback=[checkpoint_callback, eval_callback],
     )
 
