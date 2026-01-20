@@ -19,8 +19,7 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import Array, GPUMemoryConfig, SimConfig
 
-
-@register_env("MyPickCube-v0", max_episode_steps=300)  # 200 -> 300, more time
+@register_env("MyPickCube-v0", max_episode_steps=150)  # 300 -> 400, even more time
 class MyPickCubeEnv(BaseEnv):
     """
     Simple pick cube task with PANDA robot.
@@ -33,8 +32,8 @@ class MyPickCubeEnv(BaseEnv):
     SUPPORTED_ROBOTS = ["panda"]
     agent: "PandaAgent"  # type hint
     
-    cube_half_size = 0.02
-    goal_height = 0.2  # target lift height (0.3 -> 0.2, easier)
+    cube_half_size = 0.025  # 0.02 -> 0.025 (25% bigger, easier to grasp!)
+    goal_height = 0.25  # target lift height (0.3 -> 0.2, easier)
 
     def __init__(self, *args, robot_uids="panda", robot_init_qpos_noise=0.02, **kwargs):
         self.robot_init_qpos_noise = robot_init_qpos_noise
@@ -123,16 +122,30 @@ class MyPickCubeEnv(BaseEnv):
             goal_xyz = xyz.clone()
             goal_xyz[:, 2] = self.goal_height
             self.goal_region.set_pose(Pose.create_from_pq(p=goal_xyz, q=[1, 0, 0, 0]))
+            
+            # Note: table_scene.initialize() already resets robot to default state
+            # Gripper initialization handled by default PANDA config
+            # Reward function uses STATE-based (not action) so it will guide correct behavior
 
     def evaluate(self) -> dict:
-        """Check if task is successful"""
-        # Success if cube is lifted above goal height and held
-        cube_pos = self.cube.pose.p
-        # More lenient: goal_height(0.2) - 0.08 = 0.12m (12cm lift is success)
-        success = cube_pos[:, 2] >= self.goal_height - 0.08
+        """Check if task is successful - ManiSkill style"""
+        cube_height = self.cube.pose.p[:, 2]
+        
+        # Success conditions (like ManiSkill):
+        # 1. Cube is lifted to goal height (with tolerance)
+        is_lifted = cube_height >= (self.goal_height - 0.05)
+        
+        # 2. Cube is grasped
+        is_grasped = self.agent.is_grasping(self.cube)
+        
+        # 3. Robot is static (qvel < 0.2)
+        is_robot_static = self.agent.is_static(0.2)
         
         return {
-            "success": success,
+            "success": is_lifted & is_robot_static,
+            "is_lifted": is_lifted,
+            "is_grasped": is_grasped,
+            "is_robot_static": is_robot_static,
         }
 
     def _get_obs_extra(self, info: dict):
@@ -152,33 +165,46 @@ class MyPickCubeEnv(BaseEnv):
         return obs
 
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
-        """Dense reward for training"""
-        # Distance from TCP to cube
+        """
+        Simple 4-stage dense reward (ManiSkill PickCube-v1 style)
+        
+        Stage 1: Reach cube (0~1)
+        Stage 2: Grasp cube (0~1)
+        Stage 3: Lift cube (0~1, only if grasped)
+        Stage 4: Static (0~1, only if lifted)
+        Success bonus: +5
+        
+        Total max: 5
+        """
+        
+        # Stage 1: Reaching reward (0~1)
         tcp_to_cube_dist = torch.linalg.norm(
             self.cube.pose.p - self.agent.tcp.pose.p, axis=1
         )
         reaching_reward = 1 - torch.tanh(5.0 * tcp_to_cube_dist)
-
-        # Reward for lifting cube
+        reward = reaching_reward
+        
+        # Stage 2: Grasping reward (0~1)
+        is_grasped = info["is_grasped"]
+        reward = reward + is_grasped.float()
+        
+        # Stage 3: Lifting reward (0~1, only if grasped!)
         cube_height = self.cube.pose.p[:, 2]
-        lift_reward = torch.clamp((cube_height - 0.02) / (self.goal_height - 0.02), 0, 1)
-
-        # Check if grasping
-        is_grasping = self.agent.is_grasping(self.cube, max_angle=30)
-        grasp_reward = is_grasping.float()
-
-        # Success bonus
-        success = info["success"].float()
-
-        reward = (
-            reaching_reward * 1.5      # 2.0 -> 1.5 (reaching 줄이고)
-            + grasp_reward * 4.0       # 5.0 -> 4.0 (grasping 유지)
-            + lift_reward * 10.0       # 5.0 -> 10.0 (LIFTING 대폭 증가! ⭐⭐⭐)
-            + success * 15.0           # 10.0 -> 15.0 (성공 보너스 대폭 증가!)
-        )
-
+        cube_to_goal_dist = torch.abs(cube_height - self.goal_height)
+        lift_reward = 1 - torch.tanh(5.0 * cube_to_goal_dist)
+        reward = reward + lift_reward * is_grasped.float()
+        
+        # Stage 4: Static reward (0~1, only if lifted!)
+        qvel = self.agent.robot.get_qvel()[..., :-2]  # exclude gripper joints
+        static_reward = 1 - torch.tanh(5.0 * torch.linalg.norm(qvel, axis=1))
+        reward = reward + static_reward * info["is_lifted"].float()
+        
+        # Success bonus (+5)
+        reward[info["success"]] = 5.0
+        
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        max_reward = 30.5  # 1.5 + 4.0 + 10.0 + 15.0
+        # max: 1 + 1 + 1 + 1 + success(5) = 5
+        max_reward = 5.0
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

@@ -65,14 +65,14 @@ def main():
     model = PPO(
         "MlpPolicy",
         train_env,
-        learning_rate=3e-4,# 3e-4 (기본), 1e-4 (안정), 1e-3 (빠름)
+        learning_rate=1e-4,# 3e-4 (기본), 1e-4 (안정), 1e-3 (빠름)
         n_steps=256,  # steps per env per update
         batch_size=256,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.0,
+        clip_range=0.1,
+        ent_coef=0.01,
         verbose=1,
         tensorboard_log="./tensorboard_logs/",
     )
@@ -96,15 +96,16 @@ def main():
     )
 
     # Train
+    total_timesteps = 3_000_000  # 75만 -> 100만 (grasping needs more practice)
     print("\n[4/4] Starting training...")
-    print("   - Total timesteps: 500,000")
+    print(f"   - Total timesteps: {total_timesteps}")
     print("   - Checkpoints saved every 50k steps to: ./checkpoints/")
     print("   - Best model saved to: ./best_model/")
     print("   - Tensorboard logs: ./tensorboard_logs/")
     print("=" * 60)
     
     model.learn(
-        total_timesteps=750_000,
+        total_timesteps=total_timesteps,
         callback=[checkpoint_callback, eval_callback],
     )
 
