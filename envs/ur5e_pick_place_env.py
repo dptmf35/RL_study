@@ -52,6 +52,8 @@ class UR5ePickPlaceEnv(gym.Env):
         reward_type: str = "dense",
         randomize_cube: bool = True,
         randomize_target: bool = False,
+        task_mode: str = "pick_place",  # "reach", "pick", "pick_place"
+        easy_mode: bool = False,  # Reduced randomization for easier learning
     ):
         """
         Initialize the UR5e Pick and Place environment.
@@ -62,6 +64,9 @@ class UR5ePickPlaceEnv(gym.Env):
             reward_type: "dense" or "sparse" reward
             randomize_cube: Whether to randomize cube initial position
             randomize_target: Whether to randomize target position
+            task_mode: "reach" (just reach cube), "pick" (pick up cube),
+                      "pick_place" (full task)
+            easy_mode: If True, use smaller randomization range
         """
         super().__init__()
 
@@ -70,6 +75,8 @@ class UR5ePickPlaceEnv(gym.Env):
         self.reward_type = reward_type
         self.randomize_cube = randomize_cube
         self.randomize_target = randomize_target
+        self.task_mode = task_mode
+        self.easy_mode = easy_mode
 
         # Load MuJoCo model
         model_path = Path(__file__).parent.parent / "assets" / "ur5e_pick_place.xml"
@@ -121,13 +128,23 @@ class UR5ePickPlaceEnv(gym.Env):
         # Home position for robot
         self.home_qpos = np.array([-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0])
 
-        # Workspace limits for randomization
-        self.cube_spawn_range = {
-            "x": (0.3, 0.6),
-            "y": (-0.3, 0.1),
-            "z": 0.475  # Fixed height (on table)
-        }
-        self.target_position = np.array([0.6, 0.2, 0.475])  # Default target
+        # Workspace limits for randomization (adjusted for robot's reachable area)
+        # Robot home EE is around X=-0.13, Y=0.49, so cube should spawn near that area
+        if self.easy_mode:
+            # Easier: cube spawns very close to home position
+            self.cube_spawn_range = {
+                "x": (-0.10, 0.05),
+                "y": (0.38, 0.48),
+                "z": 0.475  # Fixed height (on table)
+            }
+        else:
+            # Normal: cube spawns in wider but still reachable area
+            self.cube_spawn_range = {
+                "x": (-0.20, 0.12),
+                "y": (0.32, 0.52),
+                "z": 0.475  # Fixed height (on table)
+            }
+        self.target_position = np.array([0.12, 0.42, 0.475])  # Adjusted target in reachable area
 
         # Task thresholds
         self.grasp_height_threshold = 0.52  # Height to consider cube grasped
@@ -206,17 +223,26 @@ class UR5ePickPlaceEnv(gym.Env):
         }
 
     def _compute_reward(self) -> Tuple[float, Dict[str, float]]:
-        """Compute reward based on current state."""
-        ee_pos = self.data.site_xpos[self.ee_site_id]
-        cube_pos = self.data.xpos[self.cube_body_id]
-        target_pos = self.data.site_xpos[self.target_site_id]
+        """Compute reward based on current state with improved shaping."""
+        ee_pos = self.data.site_xpos[self.ee_site_id].copy()
+        cube_pos = self.data.xpos[self.cube_body_id].copy()
+        target_pos = self.data.site_xpos[self.target_site_id].copy()
 
+        # Get gripper state
+        gripper_pos = np.array([self.data.qpos[self.model.jnt_qposadr[jid]]
+                               for jid in self.gripper_joint_ids])
+        gripper_closed = np.mean(gripper_pos) > 0.015  # Gripper closing threshold
+
+        # Distances
         dist_to_cube = np.linalg.norm(ee_pos - cube_pos)
+        dist_to_cube_xy = np.linalg.norm(ee_pos[:2] - cube_pos[:2])  # Horizontal distance
         dist_to_target = np.linalg.norm(cube_pos - target_pos)
         cube_height = cube_pos[2]
+        table_height = 0.45  # Table surface height
 
         reward_components = {
             "reach": 0.0,
+            "align": 0.0,
             "grasp": 0.0,
             "lift": 0.0,
             "place": 0.0,
@@ -224,41 +250,69 @@ class UR5ePickPlaceEnv(gym.Env):
         }
 
         if self.reward_type == "sparse":
-            # Sparse reward: only reward task completion
-            if dist_to_target < self.place_threshold and cube_height > 0.45:
+            if dist_to_target < self.place_threshold and cube_height > table_height:
                 reward_components["success"] = 100.0
                 self.task_success = True
             return sum(reward_components.values()), reward_components
 
-        # Dense reward
-        # 1. Reaching reward (encourage getting close to cube)
-        reach_reward = -dist_to_cube
-        reward_components["reach"] = reach_reward * 1.0
+        # ========== IMPROVED DENSE REWARD ==========
 
-        # 2. Grasping reward (encourage grasping when close)
-        if dist_to_cube < self.reach_threshold:
-            # Check if gripper is closed and cube is between fingers
-            gripper_pos = np.array([self.data.qpos[self.model.jnt_qposadr[jid]]
-                                   for jid in self.gripper_joint_ids])
-            if np.mean(gripper_pos) > 0.01:  # Gripper somewhat closed
-                reward_components["grasp"] = 2.0
+        # Stage 1: REACHING - Get gripper close to cube
+        # Use exponential reward to encourage getting closer
+        reach_reward = 1.0 - np.tanh(5.0 * dist_to_cube)  # Range: [0, 1]
+        reward_components["reach"] = reach_reward * 2.0
 
-                # Check if cube is lifted
-                if cube_height > self.grasp_height_threshold:
+        # Stage 2: ALIGNMENT - Position gripper above cube for grasping
+        # Bonus for being above the cube (good grasping position)
+        height_above_cube = ee_pos[2] - cube_pos[2]
+        if dist_to_cube_xy < 0.08 and 0.02 < height_above_cube < 0.15:
+            align_reward = 1.0 - np.tanh(10.0 * dist_to_cube_xy)
+            reward_components["align"] = align_reward * 1.5
+
+        # Stage 3: GRASPING - Close gripper when close to cube
+        if dist_to_cube < 0.08:
+            if gripper_closed:
+                reward_components["grasp"] = 3.0
+
+                # Detect actual grasp: cube moves with gripper (height increased)
+                if cube_height > table_height + 0.03:
                     self.cube_grasped = True
-                    reward_components["lift"] = 5.0
 
-        # 3. Placement reward (encourage moving cube to target)
-        if self.cube_grasped or cube_height > self.grasp_height_threshold:
-            place_reward = -dist_to_target
-            reward_components["place"] = place_reward * 2.0
+        # Stage 4: LIFTING - Lift the cube
+        if self.cube_grasped or (gripper_closed and cube_height > table_height + 0.03):
+            self.cube_grasped = True
+            # Reward for lifting higher
+            lift_height = max(0, cube_height - table_height)
+            lift_reward = min(lift_height * 20.0, 5.0)  # Cap at 5.0
+            reward_components["lift"] = lift_reward
 
-            # Task completion
-            if dist_to_target < self.place_threshold:
-                reward_components["success"] = 100.0
+            # Stage 5: PLACEMENT - Move cube toward target
+            # Only start rewarding placement after lifting
+            if cube_height > table_height + 0.05:
+                place_reward = 1.0 - np.tanh(3.0 * dist_to_target)
+                reward_components["place"] = place_reward * 5.0
+
+        # Stage 6: SUCCESS - Based on task_mode
+        if self.task_mode == "reach":
+            # Success = reach the cube
+            if dist_to_cube < 0.05:
+                reward_components["success"] = 20.0
+                self.task_success = True
+        elif self.task_mode == "pick":
+            # Success = pick up the cube
+            if self.cube_grasped and cube_height > table_height + 0.08:
+                reward_components["success"] = 30.0
+                self.task_success = True
+        else:  # pick_place
+            # Success = cube at target
+            if dist_to_target < self.place_threshold and cube_height > table_height:
+                reward_components["success"] = 50.0
                 self.task_success = True
 
-        total_reward = sum(reward_components.values())
+        # Small penalty for each timestep to encourage faster completion
+        time_penalty = -0.01
+
+        total_reward = sum(reward_components.values()) + time_penalty
         return total_reward, reward_components
 
     def reset(

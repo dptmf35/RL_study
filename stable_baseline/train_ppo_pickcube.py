@@ -23,7 +23,7 @@ def main():
     print("\n[1/4] Creating training environment...")
     train_env = gym.make(
         "MyPickCube-v0",
-        num_envs=32,  # parallel environments
+        num_envs=1024,  # parallel environments
         obs_mode="state",
         control_mode="pd_joint_delta_pos",
         reward_mode="dense",  # Use dense reward! ⭐
@@ -65,14 +65,14 @@ def main():
     model = PPO(
         "MlpPolicy",
         train_env,
-        learning_rate=1e-4,# 3e-4 (기본), 1e-4 (안정), 1e-3 (빠름)
+        learning_rate=3e-4,# 3e-4 (기본), 1e-4 (안정), 1e-3 (빠름)
         n_steps=256,  # steps per env per update
         batch_size=256,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
-        clip_range=0.1,
-        ent_coef=0.01,
+        clip_range=0.2,
+        ent_coef=0.0,
         verbose=1,
         tensorboard_log="./tensorboard_logs/",
     )
@@ -90,13 +90,13 @@ def main():
         eval_env,
         best_model_save_path="./best_model/",
         log_path="./eval_logs/",
-        eval_freq=25_000,  # evaluate every 25k steps
+        eval_freq=50_000,  # evaluate every 25k steps
         n_eval_episodes=8,
         deterministic=True,
     )
 
     # Train
-    total_timesteps = 3_000_000  # 75만 -> 100만 (grasping needs more practice)
+    total_timesteps = 10_000_000  # 75만 -> 100만 (grasping needs more practice)
     print("\n[4/4] Starting training...")
     print(f"   - Total timesteps: {total_timesteps}")
     print("   - Checkpoints saved every 50k steps to: ./checkpoints/")

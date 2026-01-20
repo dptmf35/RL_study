@@ -135,8 +135,8 @@ class MyPickCubeEnv(BaseEnv):
         # 1. Cube is lifted to goal height (with tolerance)
         is_lifted = cube_height >= (self.goal_height - 0.05)
         
-        # 2. Cube is grasped
-        is_grasped = self.agent.is_grasping(self.cube)
+        # 2. Cube is grasped (more lenient: max_angle=60)
+        is_grasped = self.agent.is_grasping(self.cube, max_angle=60)
         
         # 3. Robot is static (qvel < 0.2)
         is_robot_static = self.agent.is_static(0.2)
@@ -166,15 +166,15 @@ class MyPickCubeEnv(BaseEnv):
 
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
         """
-        Simple 4-stage dense reward (ManiSkill PickCube-v1 style)
+        Simple 4-stage dense reward with emphasis on lifting
         
         Stage 1: Reach cube (0~1)
-        Stage 2: Grasp cube (0~1)
-        Stage 3: Lift cube (0~1, only if grasped)
+        Stage 2: Grasp cube (0~2) ← 2x weight
+        Stage 3: Lift cube (0~3, only if grasped) ← 3x weight!
         Stage 4: Static (0~1, only if lifted)
-        Success bonus: +5
+        Success bonus: +10
         
-        Total max: 5
+        Total max: 10
         """
         
         # Stage 1: Reaching reward (0~1)
@@ -184,14 +184,23 @@ class MyPickCubeEnv(BaseEnv):
         reaching_reward = 1 - torch.tanh(5.0 * tcp_to_cube_dist)
         reward = reaching_reward
         
-        # Stage 2: Grasping reward (0~1)
+        # Stage 2: Grasping reward (0~2, 2x weight!)
         is_grasped = info["is_grasped"]
-        reward = reward + is_grasped.float()
+        reward = reward + is_grasped.float() * 2.0
         
-        # Stage 3: Lifting reward (0~1, only if grasped!)
+        # Stage 3: Lifting reward (0~3, only if grasped!) ← 3x weight!
+        # Reward actual height increase (more direct signal!)
         cube_height = self.cube.pose.p[:, 2]
-        cube_to_goal_dist = torch.abs(cube_height - self.goal_height)
-        lift_reward = 1 - torch.tanh(5.0 * cube_to_goal_dist)
+        table_height = self.cube_half_size  # 0.025 (table surface)
+        
+        # Height above table (0 = on table, 0.225 = at goal)
+        lift_height = torch.clamp(cube_height - table_height, 0, self.goal_height)
+        
+        # Linear reward for height progress (clearer signal than tanh)
+        # 0m → 0, 0.1m → 1.33, 0.2m → 2.67, 0.225m → 3.0
+        lift_reward = (lift_height / self.goal_height) * 3.0
+        
+        # Only reward if grasped (prevents accidental bumps)
         reward = reward + lift_reward * is_grasped.float()
         
         # Stage 4: Static reward (0~1, only if lifted!)
@@ -199,12 +208,13 @@ class MyPickCubeEnv(BaseEnv):
         static_reward = 1 - torch.tanh(5.0 * torch.linalg.norm(qvel, axis=1))
         reward = reward + static_reward * info["is_lifted"].float()
         
-        # Success bonus (+5)
-        reward[info["success"]] = 5.0
+        # Success bonus (+10)
+        reward[info["success"]] = 10.0
         
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        # max: 1 + 1 + 1 + 1 + success(5) = 5
-        max_reward = 5.0
+        # max: 1 (reach) + 2 (grasp) + 3 (lift) + 1 (static) + 10 (success) = 17
+        # But success replaces all, so practical max = 10
+        max_reward = 10.0
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

@@ -60,7 +60,8 @@ class TensorboardCallback(BaseCallback):
         return True
 
 
-def make_env(rank: int, seed: int = 0, reward_type: str = "dense"):
+def make_env(rank: int, seed: int = 0, reward_type: str = "dense",
+             task_mode: str = "pick_place", easy_mode: bool = False):
     """Create a wrapped, monitored environment."""
 
     def _init():
@@ -70,6 +71,8 @@ def make_env(rank: int, seed: int = 0, reward_type: str = "dense"):
             reward_type=reward_type,
             randomize_cube=True,
             randomize_target=False,
+            task_mode=task_mode,
+            easy_mode=easy_mode,
         )
         env.reset(seed=seed + rank)
         return env
@@ -81,7 +84,8 @@ def train(args):
     """Main training function."""
     # Create output directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"ppo_ur5e_{timestamp}"
+    easy_str = "_easy" if args.easy_mode else ""
+    run_name = f"ppo_ur5e_{args.task_mode}{easy_str}_{timestamp}"
 
     log_dir = Path(args.log_dir) / run_name
     model_dir = Path(args.model_dir) / run_name
@@ -89,16 +93,19 @@ def train(args):
     model_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Training run: {run_name}")
+    print(f"Task mode: {args.task_mode}")
+    print(f"Easy mode: {args.easy_mode}")
     print(f"Logs: {log_dir}")
     print(f"Models: {model_dir}")
 
     # Create vectorized environment
     if args.n_envs > 1:
         env = SubprocVecEnv(
-            [make_env(i, args.seed, args.reward_type) for i in range(args.n_envs)]
+            [make_env(i, args.seed, args.reward_type, args.task_mode, args.easy_mode)
+             for i in range(args.n_envs)]
         )
     else:
-        env = DummyVecEnv([make_env(0, args.seed, args.reward_type)])
+        env = DummyVecEnv([make_env(0, args.seed, args.reward_type, args.task_mode, args.easy_mode)])
 
     # Normalize observations and rewards
     env = VecNormalize(
@@ -110,7 +117,7 @@ def train(args):
     )
 
     # Create evaluation environment
-    eval_env = DummyVecEnv([make_env(0, args.seed + 1000, args.reward_type)])
+    eval_env = DummyVecEnv([make_env(0, args.seed + 1000, args.reward_type, args.task_mode, args.easy_mode)])
     eval_env = VecNormalize(
         eval_env,
         norm_obs=True,
@@ -221,6 +228,18 @@ def parse_args():
         default="dense",
         choices=["dense", "sparse"],
         help="Reward type (default: dense)",
+    )
+    parser.add_argument(
+        "--task-mode",
+        type=str,
+        default="pick_place",
+        choices=["reach", "pick", "pick_place"],
+        help="Task mode: reach (just reach), pick (pick up), pick_place (full task)",
+    )
+    parser.add_argument(
+        "--easy-mode",
+        action="store_true",
+        help="Use easier settings (smaller randomization range)",
     )
 
     # Training
