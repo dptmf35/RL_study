@@ -77,32 +77,5 @@ Thumbs.db
 !**/.env.sample
 !**/.env.template
 
-# Node.js artefacts
-node_modules/
-*.tsbuildinfo
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-# Frontend build outputs
-*.eslintcache
-*.stylelintcache
-*.parcel-cache
-.vite/
-.happypack/
-
-# Project-specific generated data
-simulation/**/video_test_output*/
-simulation/**/test_output*.log
-software/**/test_output*.log
-
-# Ignore web_control artefacts already covered locally
-web_control/client/node_modules/
-web_control/client/dist/
-web_control/client/.cache/
-web_control/server/.venv/
-web_control/server/__pycache__/
-web_control/server/.pytest_cache/
-.claude/
+# tensorboard logs
+tensorboard_logs/*
