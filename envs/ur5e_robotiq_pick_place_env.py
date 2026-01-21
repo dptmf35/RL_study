@@ -1,9 +1,8 @@
 """
-UR5e Pick and Place Environment for Reinforcement Learning
+UR5e + Robotiq 2F85 Pick and Place Environment for Reinforcement Learning
 
-This environment simulates a UR5e robot arm performing pick and place tasks
-with a cube object. The cube's initial position is randomized, and the robot
-must learn to pick it up and place it at a target location.
+This environment simulates a UR5e robot arm with Robotiq 2F85 gripper performing
+pick and place tasks with a cube object.
 """
 
 import numpy as np
@@ -15,14 +14,15 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any
 
 
-class UR5ePickPlaceEnv(gym.Env):
+class UR5eRobotiqPickPlaceEnv(gym.Env):
     """
-    UR5e Pick and Place Environment.
+    UR5e + Robotiq 2F85 Pick and Place Environment.
 
     Observation Space:
         - Joint positions (6)
         - Joint velocities (6)
-        - Gripper position (2)
+        - Gripper position (1) - driver joint position
+        - Gripper velocity (1)
         - End effector position (3)
         - Cube position (3)
         - Cube velocity (3)
@@ -32,8 +32,8 @@ class UR5ePickPlaceEnv(gym.Env):
         Total: 32 dimensions
 
     Action Space:
-        - Delta joint positions (6) - continuous
-        - Gripper command (1) - continuous (0: open, 1: close)
+        - Delta joint positions (6) - continuous [-1, 1]
+        - Gripper command (1) - continuous [-1, 1] (mapped to 0-255)
         Total: 7 dimensions
 
     Reward:
@@ -53,10 +53,10 @@ class UR5ePickPlaceEnv(gym.Env):
         randomize_cube: bool = True,
         randomize_target: bool = False,
         task_mode: str = "pick_place",  # "reach", "pick", "pick_place"
-        easy_mode: bool = False,  # Reduced randomization for easier learning
+        easy_mode: bool = False,
     ):
         """
-        Initialize the UR5e Pick and Place environment.
+        Initialize the UR5e + Robotiq 2F85 Pick and Place environment.
 
         Args:
             render_mode: "human" for live rendering, "rgb_array" for image output
@@ -64,8 +64,7 @@ class UR5ePickPlaceEnv(gym.Env):
             reward_type: "dense" or "sparse" reward
             randomize_cube: Whether to randomize cube initial position
             randomize_target: Whether to randomize target position
-            task_mode: "reach" (just reach cube), "pick" (pick up cube),
-                      "pick_place" (full task)
+            task_mode: "reach", "pick", "pick_place"
             easy_mode: If True, use smaller randomization range
         """
         super().__init__()
@@ -79,13 +78,13 @@ class UR5ePickPlaceEnv(gym.Env):
         self.easy_mode = easy_mode
 
         # Load MuJoCo model
-        model_path = Path(__file__).parent.parent / "assets" / "ur5e_pick_place.xml"
+        model_path = Path(__file__).parent.parent / "assets" / "ur5e_robotiq_pick_place.xml"
         self.model = mujoco.MjModel.from_xml_path(str(model_path))
         self.data = mujoco.MjData(self.model)
 
         # Simulation parameters
         self.dt = self.model.opt.timestep
-        self.frame_skip = 10  # Number of simulation steps per action
+        self.frame_skip = 10
 
         # Robot configuration
         self.n_joints = 6
@@ -93,73 +92,65 @@ class UR5ePickPlaceEnv(gym.Env):
             "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
             "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"
         ]
-        self.gripper_joint_names = ["finger_left_joint", "finger_right_joint"]
 
         # Get joint indices
         self.joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
                          for name in self.joint_names]
-        self.gripper_joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
-                                  for name in self.gripper_joint_names]
+        
+        # Robotiq gripper - uses driver joint position
+        self.gripper_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "right_driver_joint")
 
         # Get actuator indices
         self.actuator_ids = list(range(6))  # First 6 actuators are for arm
-        self.gripper_actuator_ids = [6, 7]  # Last 2 are for gripper
+        self.gripper_actuator_id = 6  # Robotiq gripper actuator
 
         # Get site/body indices
-        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripper_center")
+        self.pinch_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "pinch")
         self.cube_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "cube")
         self.target_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "target_site")
 
         # Action and observation spaces
-        # Actions: delta joint positions (6) + gripper (1)
         self.action_space = spaces.Box(
             low=-1.0, high=1.0, shape=(7,), dtype=np.float32
         )
 
-        # Observations: see docstring
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(32,), dtype=np.float32
         )
 
         # Action scaling
-        self.joint_action_scale = 0.1  # Scale for delta joint actions
-        self.gripper_action_threshold = 0.0  # Threshold for gripper open/close (centered at 0)
+        self.joint_action_scale = 0.1
+        self.gripper_action_threshold = 0.0  # Threshold for gripper open/close
 
-        # Home position for robot (optimized for grasping from table)
-        # Original: [-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0]
-        # Adjusted: shoulder_lift=-1.3, elbow=2.2, wrist1=-2.0 to lower EE near table
-        self.home_qpos = np.array([-1.5708, -1.3, 2.2, -2.0, -1.5708, 0])
+        # Home position
+        self.home_qpos = np.array([-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0])
 
-        # Workspace limits for randomization (adjusted for robot's reachable area)
-        # Robot home EE site is at X=-0.134, Y=0.372, Z=0.493
-        # Finger geoms are at Z=0.493 with half-height 0.025, so finger range is 0.468-0.518
-        # Cube center must be WITHIN finger Z range for grasping
+        # Workspace limits for cube spawning (relative to table at 0.5, 0, 0.4)
         if self.easy_mode:
-            # Easier: cube spawns DIRECTLY in gripper grasp zone
             self.cube_spawn_range = {
-                "x": (-0.15, -0.12),  # ±0.015 from EE X=-0.134
-                "y": (0.365, 0.380),  # Matching gripper Y
-                "z": 0.49             # Within finger Z range (0.468-0.518)
+                "x": (0.45, 0.55),
+                "y": (-0.05, 0.05),
+                "z": 0.435  # On table surface
             }
         else:
-            # Normal: cube spawns in wider but still reachable area
             self.cube_spawn_range = {
-                "x": (-0.18, -0.08),  # Wider X range around EE
-                "y": (0.35, 0.42),    # Wider Y range
-                "z": 0.49             # Within finger grasp range
+                "x": (0.4, 0.6),
+                "y": (-0.15, 0.15),
+                "z": 0.435
             }
-        self.target_position = np.array([-0.10, 0.50, 0.55])  # Adjusted target
+        
+        self.target_position = np.array([0.5, 0.2, 0.42])
 
         # Task thresholds
-        self.grasp_height_threshold = 0.52  # Height to consider cube grasped
-        self.place_threshold = 0.05  # Distance threshold for successful placement
-        self.reach_threshold = 0.05  # Distance threshold for reaching cube
+        self.grasp_height_threshold = 0.45  # Height to consider cube grasped
+        self.place_threshold = 0.05
+        self.reach_threshold = 0.05
 
         # Episode tracking
         self.current_step = 0
         self.cube_grasped = False
         self.task_success = False
-        self.gripper_was_open_near_cube = False  # Track grasp sequence
+        self.gripper_was_open_near_cube = False
 
         # Rendering
         self.viewer = None
@@ -173,12 +164,12 @@ class UR5ePickPlaceEnv(gym.Env):
         joint_vel = np.array([self.data.qvel[self.model.jnt_dofadr[jid]]
                              for jid in self.joint_ids])
 
-        # Gripper position
-        gripper_pos = np.array([self.data.qpos[self.model.jnt_qposadr[jid]]
-                               for jid in self.gripper_joint_ids])
+        # Gripper state (driver joint position and velocity)
+        gripper_pos = self.data.qpos[self.model.jnt_qposadr[self.gripper_joint_id]]
+        gripper_vel = self.data.qvel[self.model.jnt_dofadr[self.gripper_joint_id]]
 
-        # End effector position
-        ee_pos = self.data.site_xpos[self.ee_site_id].copy()
+        # End effector position (pinch site)
+        ee_pos = self.data.site_xpos[self.pinch_site_id].copy()
 
         # Cube position and velocity
         cube_pos = self.data.xpos[self.cube_body_id].copy()
@@ -194,7 +185,8 @@ class UR5ePickPlaceEnv(gym.Env):
         obs = np.concatenate([
             joint_pos,        # 6
             joint_vel,        # 6
-            gripper_pos,      # 2
+            [gripper_pos],    # 1
+            [gripper_vel],    # 1
             ee_pos,           # 3
             cube_pos,         # 3
             cube_vel,         # 3
@@ -207,14 +199,13 @@ class UR5ePickPlaceEnv(gym.Env):
 
     def _get_cube_velocity(self) -> np.ndarray:
         """Get cube linear velocity."""
-        # Find the cube's qvel index (freejoint has 6 DOFs: 3 position + 3 orientation)
         cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
         vel_addr = self.model.jnt_dofadr[cube_joint_id]
         return self.data.qvel[vel_addr:vel_addr+3].copy()
 
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info about the environment state."""
-        ee_pos = self.data.site_xpos[self.ee_site_id]
+        ee_pos = self.data.site_xpos[self.pinch_site_id]
         cube_pos = self.data.xpos[self.cube_body_id]
         target_pos = self.data.site_xpos[self.target_site_id]
 
@@ -228,34 +219,25 @@ class UR5ePickPlaceEnv(gym.Env):
         }
 
     def _compute_reward(self) -> Tuple[float, Dict[str, float]]:
-        """Compute reward based on current state with improved shaping.
-
-        Key improvements:
-        - Gripper must OPEN near cube before closing (grasp sequence)
-        - Reach reward is capped to prevent reward hacking
-        - Strong incentive for proper grasp sequence
-        """
-        ee_pos = self.data.site_xpos[self.ee_site_id].copy()
+        """Compute reward based on current state."""
+        ee_pos = self.data.site_xpos[self.pinch_site_id].copy()
         cube_pos = self.data.xpos[self.cube_body_id].copy()
         target_pos = self.data.site_xpos[self.target_site_id].copy()
 
-        # Get gripper state (higher value = more closed)
-        gripper_pos = np.array([self.data.qpos[self.model.jnt_qposadr[jid]]
-                               for jid in self.gripper_joint_ids])
-        gripper_openness = np.mean(gripper_pos)
-        gripper_is_open = gripper_openness < 0.002  # Nearly fully open (range 0-0.018)
-        gripper_is_closed = gripper_openness > 0.010  # Sufficiently closed for grasp
+        # Get gripper state (0 = open, 0.8 = closed for Robotiq)
+        gripper_pos = self.data.qpos[self.model.jnt_qposadr[self.gripper_joint_id]]
+        gripper_is_open = gripper_pos < 0.1
+        gripper_is_closed = gripper_pos > 0.5
 
         # Distances
         dist_to_cube = np.linalg.norm(ee_pos - cube_pos)
-        dist_to_cube_xy = np.linalg.norm(ee_pos[:2] - cube_pos[:2])  # Horizontal distance
         dist_to_target = np.linalg.norm(cube_pos - target_pos)
         cube_height = cube_pos[2]
-        table_height = 0.47  # Table surface height (table top at Z=0.47)
+        table_height = 0.42
 
         reward_components = {
             "reach": 0.0,
-            "gripper_prep": 0.0,  # New: reward for opening gripper near cube
+            "gripper_prep": 0.0,
             "grasp": 0.0,
             "lift": 0.0,
             "place": 0.0,
@@ -268,10 +250,8 @@ class UR5ePickPlaceEnv(gym.Env):
                 self.task_success = True
             return sum(reward_components.values()), reward_components
 
-        # ========== IMPROVED DENSE REWARD WITH GRASP SEQUENCE ==========
-
-        # Stage 1: REACHING - Get gripper close to cube (CAPPED reward)
-        # Use sparse milestones instead of continuous reward to prevent hacking
+        # Dense reward
+        # Stage 1: Reaching
         if dist_to_cube < 0.30:
             reward_components["reach"] = 0.5
         if dist_to_cube < 0.15:
@@ -281,51 +261,44 @@ class UR5ePickPlaceEnv(gym.Env):
         if dist_to_cube < 0.05:
             reward_components["reach"] = 2.0
 
-        # Stage 2: GRIPPER PREPARATION - Open gripper when near cube (CRITICAL)
-        # This teaches the robot that gripper must be OPEN before closing
+        # Stage 2: Gripper preparation
         if dist_to_cube < 0.10:
             if gripper_is_open:
-                # Gripper is open near cube - excellent! Record this
                 self.gripper_was_open_near_cube = True
-                reward_components["gripper_prep"] = 3.0  # Strong reward for opening
+                reward_components["gripper_prep"] = 3.0
             elif not self.gripper_was_open_near_cube:
-                # Gripper is closed but was never opened - penalty
                 reward_components["gripper_prep"] = -1.0
 
-        # Stage 3: GRASPING - Close gripper ONLY after being open near cube
+        # Stage 3: Grasping
         if dist_to_cube < 0.06:
             if gripper_is_closed:
                 if self.gripper_was_open_near_cube:
-                    # Proper sequence: was open, now closed
                     reward_components["grasp"] = 5.0
-
-                    # Detect actual grasp: cube moves with gripper
+                    
                     if cube_height > table_height + 0.02:
                         self.cube_grasped = True
-                        reward_components["grasp"] = 8.0  # Bonus for actually grasping
+                        reward_components["grasp"] = 8.0
                 else:
-                    # Closed without opening first - small penalty
                     reward_components["grasp"] = -0.5
 
-        # Stage 4: LIFTING - Lift the cube (only if properly grasped)
+        # Stage 4: Lifting
         if self.cube_grasped:
             lift_height = max(0, cube_height - table_height)
-            # Give significant reward for lifting
-            lift_reward = min(lift_height * 30.0, 10.0)  # Cap at 10.0
+            lift_reward = min(lift_height * 30.0, 10.0)
             reward_components["lift"] = lift_reward
 
-            # Stage 5: PLACEMENT - Move cube toward target
-            if cube_height > table_height + 0.05:
+            # Stage 5: Placement
+            if cube_height > table_height + 0.03:
                 place_reward = (1.0 - np.tanh(3.0 * dist_to_target)) * 5.0
                 reward_components["place"] = place_reward
 
-        # Stage 6: SUCCESS - Based on task_mode
+        # Stage 6: Success
         if self.task_mode == "reach":
             if dist_to_cube < 0.05:
                 reward_components["success"] = 20.0
                 self.task_success = True
         elif self.task_mode == "pick":
-            if self.cube_grasped and cube_height > table_height + 0.08:
+            if self.cube_grasped and cube_height > table_height + 0.05:
                 reward_components["success"] = 50.0
                 self.task_success = True
         else:  # pick_place
@@ -333,7 +306,7 @@ class UR5ePickPlaceEnv(gym.Env):
                 reward_components["success"] = 100.0
                 self.task_success = True
 
-        # Small penalty for each timestep to encourage faster completion
+        # Time penalty
         time_penalty = -0.02
 
         total_reward = sum(reward_components.values()) + time_penalty
@@ -354,9 +327,9 @@ class UR5ePickPlaceEnv(gym.Env):
         for i, jid in enumerate(self.joint_ids):
             self.data.qpos[self.model.jnt_qposadr[jid]] = self.home_qpos[i]
 
-        # Open gripper
-        for jid in self.gripper_joint_ids:
-            self.data.qpos[self.model.jnt_qposadr[jid]] = 0.0
+        # Open gripper (set driver joints to initial position)
+        gripper_qpos_addr = self.model.jnt_qposadr[self.gripper_joint_id]
+        self.data.qpos[gripper_qpos_addr] = 0.0  # Open position
 
         # Randomize cube position
         if self.randomize_cube:
@@ -364,28 +337,27 @@ class UR5ePickPlaceEnv(gym.Env):
             cube_y = self.np_random.uniform(*self.cube_spawn_range["y"])
             cube_z = self.cube_spawn_range["z"]
         else:
-            cube_x, cube_y, cube_z = 0.4, -0.2, 0.475
+            cube_x, cube_y, cube_z = 0.5, 0.0, 0.435
 
-        # Set cube position (freejoint: 3 pos + 4 quat)
+        # Set cube position
         cube_joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "cube_joint")
         cube_qpos_addr = self.model.jnt_qposadr[cube_joint_id]
         self.data.qpos[cube_qpos_addr:cube_qpos_addr+3] = [cube_x, cube_y, cube_z]
-        self.data.qpos[cube_qpos_addr+3:cube_qpos_addr+7] = [1, 0, 0, 0]  # Identity quaternion
+        self.data.qpos[cube_qpos_addr+3:cube_qpos_addr+7] = [1, 0, 0, 0]
 
         # Randomize target if needed
         if self.randomize_target:
-            target_x = self.np_random.uniform(0.4, 0.7)
-            target_y = self.np_random.uniform(-0.1, 0.3)
-            # Update target site position (need to modify model)
-            self.target_position = np.array([target_x, target_y, 0.475])
+            target_x = self.np_random.uniform(0.4, 0.6)
+            target_y = self.np_random.uniform(-0.1, 0.1)
+            self.target_position = np.array([target_x, target_y, 0.42])
 
         # Reset episode tracking
         self.current_step = 0
         self.cube_grasped = False
         self.task_success = False
-        self.gripper_was_open_near_cube = False  # Reset grasp sequence tracker
+        self.gripper_was_open_near_cube = False
 
-        # Forward simulation to update state
+        # Forward simulation
         mujoco.mj_forward(self.model, self.data)
 
         return self._get_obs(), self._get_info()
@@ -411,15 +383,11 @@ class UR5ePickPlaceEnv(gym.Env):
         # Set control targets
         self.data.ctrl[:6] = target_joint_pos
 
-        # Gripper control (range 0-0.018 for new gripper configuration)
-        if gripper_action > self.gripper_action_threshold:
-            # Close gripper
-            self.data.ctrl[6] = 0.018
-            self.data.ctrl[7] = 0.018
-        else:
-            # Open gripper
-            self.data.ctrl[6] = 0.0
-            self.data.ctrl[7] = 0.0
+        # Gripper control: map [-1, 1] to [0, 255]
+        # -1 = open (0), 1 = close (255)
+        gripper_ctrl = (gripper_action + 1.0) * 127.5  # Map to 0-255
+        gripper_ctrl = np.clip(gripper_ctrl, 0, 255)
+        self.data.ctrl[6] = gripper_ctrl
 
         # Step simulation
         for _ in range(self.frame_skip):
@@ -462,21 +430,21 @@ class UR5ePickPlaceEnv(gym.Env):
             self._render_context = None
 
 
-# Register the environment with Gymnasium
+# Register the environment
 def register_env():
     """Register the environment with Gymnasium."""
     from gymnasium.envs.registration import register
 
     register(
-        id="UR5ePickPlace-v0",
-        entry_point="envs.ur5e_pick_place_env:UR5ePickPlaceEnv",
+        id="UR5eRobotiqPickPlace-v0",
+        entry_point="envs.ur5e_robotiq_pick_place_env:UR5eRobotiqPickPlaceEnv",
         max_episode_steps=500,
     )
 
 
 if __name__ == "__main__":
     # Test the environment
-    env = UR5ePickPlaceEnv(render_mode="human")
+    env = UR5eRobotiqPickPlaceEnv(render_mode="human")
     obs, info = env.reset()
     print(f"Observation shape: {obs.shape}")
     print(f"Action space: {env.action_space}")

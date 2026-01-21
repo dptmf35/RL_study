@@ -23,7 +23,7 @@ def main():
     print("\n[1/4] Creating training environment...")
     train_env = gym.make(
         "MyPickCube-v0",
-        num_envs=1024,  # parallel environments
+        num_envs=64,  # parallel environments
         obs_mode="state",
         control_mode="pd_joint_delta_pos",
         reward_mode="dense",  # Use dense reward! ⭐
@@ -31,13 +31,19 @@ def main():
         sim_backend="auto",  # auto select GPU/CPU
     )
     max_episode_steps = gym_utils.find_max_episode_steps_value(train_env)
-    train_env = ManiSkillSB3VectorEnv(train_env)
-    print(f"   - Training envs: 32 parallel")
+    
+    # Get the unwrapped environment to access num_envs
+    base_env = train_env
+    while hasattr(base_env, 'env') and not hasattr(base_env, 'num_envs'):
+        base_env = base_env.env
+    
+    train_env = ManiSkillSB3VectorEnv(base_env)
+    print(f"   - Training envs: 64 parallel")
     print(f"   - Max episode steps: {max_episode_steps}")
     print(f"   - Obs space: {train_env.observation_space}")
     print(f"   - Action space: {train_env.action_space}")
 
-    # Evaluation environment (fewer envs, with video recording)
+    # Evaluation environment (fewer envs, no video during training for speed)
     print("\n[2/4] Creating evaluation environment...")
     eval_env = gym.make(
         "MyPickCube-v0",
@@ -45,20 +51,18 @@ def main():
         obs_mode="state",
         control_mode="pd_joint_delta_pos",
         reward_mode="dense",  # Use dense reward! ⭐
-        render_mode="rgb_array",  # enable rendering for eval videos
+        render_mode=None,  # No rendering during training evals (faster)
         sim_backend="auto",
     )
-    eval_env = RecordEpisode(
-        eval_env,
-        output_dir="eval_videos",
-        save_video=True,
-        trajectory_name="eval",
-        max_steps_per_video=max_episode_steps,
-        save_trajectory=False,
-    )
-    eval_env = ManiSkillSB3VectorEnv(eval_env)
+    
+    # Get the base environment for SB3 wrapper (unwrap TimeLimitWrapper)
+    base_eval_env = eval_env
+    while hasattr(base_eval_env, 'env') and not hasattr(base_eval_env, 'num_envs'):
+        base_eval_env = base_eval_env.env
+    
+    eval_env = ManiSkillSB3VectorEnv(base_eval_env)
     print(f"   - Eval envs: 8 parallel")
-    print(f"   - Videos will be saved to: eval_videos/")
+    print(f"   - Videos disabled during training for speed")
 
     # Create PPO model
     print("\n[3/4] Creating PPO model...")
@@ -66,13 +70,13 @@ def main():
         "MlpPolicy",
         train_env,
         learning_rate=3e-4,# 3e-4 (기본), 1e-4 (안정), 1e-3 (빠름)
-        n_steps=256,  # steps per env per update
-        batch_size=256,
+        n_steps=500,  # steps per env per update
+        batch_size=512,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.0,
+        ent_coef=0.01,
         verbose=1,
         tensorboard_log="./tensorboard_logs/",
     )

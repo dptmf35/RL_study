@@ -19,7 +19,7 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import Array, GPUMemoryConfig, SimConfig
 
-@register_env("MyPickCube-v0", max_episode_steps=150)  # 300 -> 400, even more time
+@register_env("MyPickCube-v0", max_episode_steps=200)  # 300 -> 400, even more time
 class MyPickCubeEnv(BaseEnv):
     """
     Simple pick cube task with PANDA robot.
@@ -166,15 +166,16 @@ class MyPickCubeEnv(BaseEnv):
 
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
         """
-        Simple 4-stage dense reward with emphasis on lifting
+        Improved dense reward with gradient-based grasping signal
         
         Stage 1: Reach cube (0~1)
-        Stage 2: Grasp cube (0~2) ← 2x weight
-        Stage 3: Lift cube (0~3, only if grasped) ← 3x weight!
+        Stage 2a: Gripper closing when close (0~1) ← NEW! Continuous gradient
+        Stage 2b: Actual grasp (0~2) ← Binary bonus
+        Stage 3: Lift cube (0~3, only if grasped)
         Stage 4: Static (0~1, only if lifted)
         Success bonus: +10
         
-        Total max: 10
+        Total max: 11
         """
         
         # Stage 1: Reaching reward (0~1)
@@ -184,7 +185,20 @@ class MyPickCubeEnv(BaseEnv):
         reaching_reward = 1 - torch.tanh(5.0 * tcp_to_cube_dist)
         reward = reaching_reward
         
-        # Stage 2: Grasping reward (0~2, 2x weight!)
+        # Stage 2a: Gripper Width Reward (Continuous gradient! ✅)
+        # Encourage closing gripper when close to cube
+        gripper_qpos = self.agent.robot.get_qpos()[..., -2:]  # [batch, 2] gripper joints
+        gripper_width = gripper_qpos.sum(dim=-1)  # [batch] total width: 0 (closed) ~ 0.08 (open)
+        
+        # Only reward closing when close to cube (within 10cm)
+        close_to_cube = (tcp_to_cube_dist < 0.1).float()
+        
+        # Reward for closing gripper (width closer to 0)
+        # Normalized: 0.08 (open) → 0 reward, 0.0 (closed) → 1.0 reward
+        gripper_close_reward = (1.0 - gripper_width / 0.08) * close_to_cube
+        reward = reward + gripper_close_reward
+        
+        # Stage 2b: Actual Grasping (Binary bonus)
         is_grasped = info["is_grasped"]
         reward = reward + is_grasped.float() * 2.0
         
@@ -214,7 +228,7 @@ class MyPickCubeEnv(BaseEnv):
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        # max: 1 (reach) + 2 (grasp) + 3 (lift) + 1 (static) + 10 (success) = 17
-        # But success replaces all, so practical max = 10
+        # max: 1 (reach) + 1 (gripper_close) + 2 (grasp) + 3 (lift) + 1 (static) = 8
+        # success replaces all with 10, so max = 10
         max_reward = 10.0
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

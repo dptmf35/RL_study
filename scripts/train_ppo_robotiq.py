@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PPO Training Script for UR5e Pick and Place Environment
+PPO Training Script for UR5e + Robotiq 2F85 Pick and Place Environment
 
 This script trains a PPO agent using Stable-Baselines3 to solve
-the UR5e pick and place task.
+the UR5e + Robotiq 2F85 pick and place task.
 """
 
 import argparse
@@ -28,7 +28,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from envs.ur5e_pick_place_env import UR5ePickPlaceEnv
+from envs.ur5e_robotiq_pick_place_env import UR5eRobotiqPickPlaceEnv
 
 
 class TensorboardCallback(BaseCallback):
@@ -65,7 +65,7 @@ def make_env(rank: int, seed: int = 0, reward_type: str = "dense",
     """Create a wrapped, monitored environment."""
 
     def _init():
-        env = UR5ePickPlaceEnv(
+        env = UR5eRobotiqPickPlaceEnv(
             render_mode=None,
             max_episode_steps=500,
             reward_type=reward_type,
@@ -74,7 +74,7 @@ def make_env(rank: int, seed: int = 0, reward_type: str = "dense",
             task_mode=task_mode,
             easy_mode=easy_mode,
         )
-        env = Monitor(env)  # Wrap with Monitor for episode statistics
+        env = Monitor(env)
         env.reset(seed=seed + rank)
         return env
 
@@ -86,7 +86,7 @@ def train(args):
     # Create output directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     easy_str = "_easy" if args.easy_mode else ""
-    run_name = f"ppo_ur5e_{args.task_mode}{easy_str}_{timestamp}"
+    run_name = f"ppo_ur5e_robotiq_{args.task_mode}{easy_str}_{timestamp}"
 
     log_dir = Path(args.log_dir) / run_name
     model_dir = Path(args.model_dir) / run_name
@@ -122,7 +122,7 @@ def train(args):
     eval_env = VecNormalize(
         eval_env,
         norm_obs=True,
-        norm_reward=False,  # Don't normalize reward for evaluation
+        norm_reward=False,
         clip_obs=10.0,
         training=False,
     )
@@ -130,8 +130,8 @@ def train(args):
     # Define network architecture
     policy_kwargs = dict(
         net_arch=dict(
-            pi=[256, 256, 128],  # Policy network
-            vf=[256, 256, 128],  # Value network
+            pi=[256, 256, 128],
+            vf=[256, 256, 128],
         ),
         activation_fn=torch.nn.ReLU,
     )
@@ -167,7 +167,7 @@ def train(args):
     checkpoint_callback = CheckpointCallback(
         save_freq=args.save_freq // args.n_envs,
         save_path=str(model_dir),
-        name_prefix="ppo_ur5e",
+        name_prefix="ppo_ur5e_robotiq",
         save_replay_buffer=False,
         save_vecnormalize=True,
     )
@@ -219,7 +219,7 @@ def train(args):
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Train PPO agent for UR5e Pick and Place"
+        description="Train PPO agent for UR5e + Robotiq 2F85 Pick and Place"
     )
 
     # Environment
@@ -235,12 +235,12 @@ def parse_args():
         type=str,
         default="pick_place",
         choices=["reach", "pick", "pick_place"],
-        help="Task mode: reach (just reach), pick (pick up), pick_place (full task)",
+        help="Task mode",
     )
     parser.add_argument(
         "--easy-mode",
         action="store_true",
-        help="Use easier settings (smaller randomization range)",
+        help="Use easier settings",
     )
 
     # Training
@@ -310,7 +310,7 @@ def parse_args():
         "--ent-coef",
         type=float,
         default=0.02,
-        help="Entropy coefficient (default: 0.02, higher for more exploration)",
+        help="Entropy coefficient (default: 0.02)",
     )
     parser.add_argument(
         "--vf-coef",

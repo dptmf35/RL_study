@@ -39,8 +39,15 @@ def evaluate(args):
     env = DummyVecEnv([lambda: env])
 
     # Load VecNormalize stats if available
-    vec_normalize_path = Path(args.model_path).parent / "vec_normalize.pkl"
-    if vec_normalize_path.exists():
+    # Try multiple locations: same dir, parent dir, grandparent dir
+    vec_normalize_path = None
+    for parent_level in range(3):
+        candidate = Path(args.model_path).parents[parent_level] / "vec_normalize.pkl"
+        if candidate.exists():
+            vec_normalize_path = candidate
+            break
+
+    if vec_normalize_path is not None:
         print(f"Loading normalization stats from: {vec_normalize_path}")
         env = VecNormalize.load(str(vec_normalize_path), env)
         env.training = False
@@ -122,8 +129,11 @@ def evaluate(args):
 
 
 def demo_random(args):
-    """Run demo with random actions."""
-    print("Running random action demo...")
+    """Run demo with random actions or static (zero actions)."""
+    if args.static:
+        print("Running static demo (robot stays still)...")
+    else:
+        print("Running random action demo...")
 
     env = UR5ePickPlaceEnv(
         render_mode="human",
@@ -139,7 +149,13 @@ def demo_random(args):
 
         episode_reward = 0
         for step in range(args.max_steps):
-            action = env.action_space.sample()
+            if args.static:
+                # Zero action (robot stays still)
+                action = np.zeros(env.action_space.shape, dtype=env.action_space.dtype)
+            else:
+                # Random action
+                action = env.action_space.sample()
+            
             obs, reward, terminated, truncated, info = env.step(action)
             episode_reward += reward
             env.render()
@@ -207,14 +223,19 @@ def parse_args():
         action="store_true",
         help="Run with random actions (no model needed)",
     )
+    parser.add_argument(
+        "--static",
+        action="store_true",
+        help="Run with zero actions (robot stays still)",
+    )
 
     args = parser.parse_args()
 
     if args.no_render:
         args.render = False
 
-    if not args.random and args.model_path is None:
-        parser.error("--model-path is required unless --random is specified")
+    if not args.random and not args.static and args.model_path is None:
+        parser.error("--model-path is required unless --random or --static is specified")
 
     return args
 
@@ -222,7 +243,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    if args.random:
+    if args.random or args.static:
         demo_random(args)
     else:
         evaluate(args)

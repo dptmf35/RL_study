@@ -2,6 +2,19 @@
   <compiler angle="radian" meshdir="ur5e/assets" autolimits="true"/>
 
   <option integrator="implicitfast" timestep="0.002"/>
+  
+  <!-- Contact parameters for realistic physics -->
+  <size njmax="1000" nconmax="500" nstack="1000000"/>
+  
+<contact>
+    <pair geom1="table_top" geom2="left_finger_geom" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    <pair geom1="table_top" geom2="right_finger_geom" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+    
+    <pair geom1="cube_geom" geom2="left_finger_geom" solref="0.02 1" solimp="0.9 0.95 0.005" margin="0.001" friction="1 0.5 0.005 0.0001 0.0001"/>
+    <pair geom1="cube_geom" geom2="right_finger_geom" solref="0.02 1" solimp="0.9 0.95 0.005" margin="0.001" friction="1 0.5 0.005 0.0001 0.0001"/>
+    
+    <pair geom1="cube_geom" geom2="table_top" solref="0.02 1" solimp="0.9 0.95 0.001"/>
+  </contact>
 
   <default>
     <default class="ur5e">
@@ -22,16 +35,20 @@
         <geom type="mesh" contype="0" conaffinity="0" group="2"/>
       </default>
       <default class="collision">
-        <geom type="capsule" group="3"/>
+        <geom type="capsule" group="3" contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
         <default class="eef_collision">
-          <geom type="cylinder"/>
+          <geom type="cylinder" contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
         </default>
       </default>
       <site size="0.001" rgba="0.5 0.5 0.5 0.3" group="4"/>
     </default>
     <default class="gripper">
-      <joint type="slide" axis="1 0 0" limited="true" range="0 0.04" damping="100" armature="0.01"/>
-      <geom type="box" size="0.01 0.02 0.04" rgba="0.5 0.5 0.5 1" friction="1 0.05 0.01"/>
+      <!-- Range 0.018: fingers move from ±0.02 to ±0.002 -->
+      <!-- Open gap = 0.04 - 2*0.005 = 0.03m (cube 0.026m fits with 4mm clearance) -->
+      <!-- Closed gap = 0.004 - 2*0.005 = -0.006m (fingers overlap/grip) -->
+      <joint type="slide" axis="1 0 0" limited="true" range="0 0.018" damping="20" armature="0.002"/>
+      <geom type="box" size="0.005 0.008 0.025" rgba="0.5 0.5 0.5 1" friction="5 0.3 0.1" 
+            contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
     </default>
   </default>
 
@@ -76,15 +93,22 @@
     <light name="spotlight" mode="targetbodycom" target="wrist_2_link" pos="0 -1 2"/>
 
     <!-- Floor -->
-    <geom name="floor" type="plane" size="2 2 0.1" pos="0 0 0" material="floor_mat"/>
+    <geom name="floor" type="plane" size="2 2 0.1" pos="0 0 0" material="floor_mat" 
+          contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001" friction="1 0.05 0.01"/>
 
-    <!-- Table - positioned in front of robot's reachable workspace -->
-    <body name="table" pos="0 0.45 0">
-      <geom name="table_top" type="box" size="0.4 0.3 0.02" pos="0 0 0.4" material="table_mat"/>
-      <geom name="table_leg1" type="cylinder" size="0.03 0.2" pos="0.35 0.25 0.2" material="table_mat"/>
-      <geom name="table_leg2" type="cylinder" size="0.03 0.2" pos="0.35 -0.25 0.2" material="table_mat"/>
-      <geom name="table_leg3" type="cylinder" size="0.03 0.2" pos="-0.35 0.25 0.2" material="table_mat"/>
-      <geom name="table_leg4" type="cylinder" size="0.03 0.2" pos="-0.35 -0.25 0.2" material="table_mat"/>
+    <!-- Table - positioned for robot to reach -->
+    <!-- Robot EE at Z=0.493. Table top should be at Z~0.47 for cube Z~0.49 -->
+    <body name="table" pos="-0.13 0.37 0">
+      <geom name="table_top" type="box" size="0.25 0.2 0.02" pos="0 0 0.45" material="table_mat" 
+            contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001" friction="1 0.05 0.01"/>
+      <geom name="table_leg1" type="cylinder" size="0.025 0.225" pos="0.2 0.15 0.225" material="table_mat" 
+            contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
+      <geom name="table_leg2" type="cylinder" size="0.025 0.225" pos="0.2 -0.15 0.225" material="table_mat" 
+            contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
+      <geom name="table_leg3" type="cylinder" size="0.025 0.225" pos="-0.2 0.15 0.225" material="table_mat" 
+            contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
+      <geom name="table_leg4" type="cylinder" size="0.025 0.225" pos="-0.2 -0.15 0.225" material="table_mat" 
+            contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
     </body>
 
     <!-- Target area (visual only) - in robot's reachable area -->
@@ -94,11 +118,12 @@
     </body>
 
     <!-- Cube object - spawns in robot's reachable workspace -->
+    <!-- Cube size: 0.026m (half-size 0.013m) fits in gripper opening 0.03m with 4mm clearance -->
     <body name="cube" pos="-0.05 0.42 0.45">
       <freejoint name="cube_joint"/>
-      <geom name="cube_geom" type="box" size="0.025 0.025 0.025" mass="0.1" material="cube_mat"
-            friction="1 0.05 0.01" solref="0.02 1"/>
-      <site name="cube_site" pos="0 0 0" size="0.01" rgba="1 0 0 1"/>
+      <geom name="cube_geom" type="box" size="0.013 0.013 0.013" mass="0.05" material="cube_mat"
+            friction="2 0.1 0.02" contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
+      <site name="cube_site" pos="0 0 0" size="0.008" rgba="1 0 0 1"/>
     </body>
 
     <!-- UR5e Robot -->
@@ -165,29 +190,36 @@
 
                   <!-- Simple parallel gripper -->
                   <body name="gripper_base" pos="0 0.1 0" quat="-1 1 0 0">
-                    <inertial mass="0.5" pos="0 0 0.05" diaginertia="0.001 0.001 0.001"/>
-                    <geom type="box" size="0.04 0.02 0.03" pos="0 0 0.03" material="gripper_mat"/>
+                    <inertial mass="0.5" pos="0 0 0.03" diaginertia="0.001 0.001 0.001"/>
+                    <geom type="box" size="0.03 0.015 0.02" pos="0 0 0.02" material="gripper_mat" 
+                          contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
 
                     <!-- Left finger -->
-                    <body name="left_finger" pos="-0.04 0 0.06">
-                      <inertial mass="0.1" pos="0 0 0.03" diaginertia="0.0001 0.0001 0.0001"/>
+                    <!-- Open: X = -0.02, Closed: X = -0.02 + 0.018 = -0.002 -->
+                    <!-- Geom thickness 0.005, inner edge when closed: -0.002+0.005 = 0.003 -->
+                    <body name="left_finger" pos="-0.02 0 0.04">
+                      <inertial mass="0.1" pos="0 0 0.025" diaginertia="0.0001 0.0001 0.0001"/>
                       <joint name="finger_left_joint" class="gripper"/>
-                      <geom name="left_finger_geom" type="box" size="0.01 0.015 0.04" pos="0 0 0.04"
-                            material="gripper_mat" friction="1 0.05 0.01"/>
-                      <site name="left_finger_site" pos="0 0 0.08" size="0.005" rgba="1 1 0 1"/>
+                      <geom name="left_finger_geom" type="box" size="0.005 0.008 0.025" pos="0 0 0.025"
+                            material="gripper_mat" friction="5 0.3 0.1" 
+                            contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
+                      <site name="left_finger_site" pos="0 0 0.05" size="0.003" rgba="1 1 0 1"/>
                     </body>
 
                     <!-- Right finger -->
-                    <body name="right_finger" pos="0.04 0 0.06">
-                      <inertial mass="0.1" pos="0 0 0.03" diaginertia="0.0001 0.0001 0.0001"/>
+                    <!-- Open: X = 0.02, Closed: X = 0.02 - 0.018 = 0.002 -->
+                    <!-- Geom thickness 0.005, inner edge when closed: 0.002-0.005 = -0.003 -->
+                    <body name="right_finger" pos="0.02 0 0.04">
+                      <inertial mass="0.1" pos="0 0 0.025" diaginertia="0.0001 0.0001 0.0001"/>
                       <joint name="finger_right_joint" class="gripper" axis="-1 0 0"/>
-                      <geom name="right_finger_geom" type="box" size="0.01 0.015 0.04" pos="0 0 0.04"
-                            material="gripper_mat" friction="1 0.05 0.01"/>
-                      <site name="right_finger_site" pos="0 0 0.08" size="0.005" rgba="1 1 0 1"/>
+                      <geom name="right_finger_geom" type="box" size="0.005 0.008 0.025" pos="0 0 0.025"
+                            material="gripper_mat" friction="5 0.3 0.1" 
+                            contype="1" conaffinity="1" solref="0.002 1" solimp="0.9 0.95 0.001"/>
+                      <site name="right_finger_site" pos="0 0 0.05" size="0.003" rgba="1 1 0 1"/>
                     </body>
 
-                    <!-- Gripper center site for grasping -->
-                    <site name="gripper_center" pos="0 0 0.1" size="0.01" rgba="0 1 1 1"/>
+                    <!-- Gripper center site at fingertip level for grasping reference -->
+                    <site name="gripper_center" pos="0 0 0.065" size="0.008" rgba="0 1 1 1"/>
                   </body>
                 </body>
               </body>
@@ -207,8 +239,8 @@
     <general class="size1" name="wrist_2" joint="wrist_2_joint"/>
     <general class="size1" name="wrist_3" joint="wrist_3_joint"/>
     <!-- Gripper actuators -->
-    <position name="gripper_left" joint="finger_left_joint" kp="1000" ctrlrange="0 0.04"/>
-    <position name="gripper_right" joint="finger_right_joint" kp="1000" ctrlrange="0 0.04"/>
+    <position name="gripper_left" joint="finger_left_joint" kp="200" ctrlrange="0 0.018"/>
+    <position name="gripper_right" joint="finger_right_joint" kp="200" ctrlrange="0 0.018"/>
   </actuator>
 
   <sensor>
