@@ -454,10 +454,10 @@ class UR5eRobotiqPickPlaceEnv(gym.Env):
         # Set control targets
         self.data.ctrl[:6] = target_joint_pos
 
-        # Gripper control: map [-1, 1] to [0, 255]
-        # -1 = open (0), 1 = close (255)
-        gripper_ctrl = (gripper_action + 1.0) * 127.5  # Map to 0-255
-        gripper_ctrl = np.clip(gripper_ctrl, 0, 255)
+        # Gripper control: map [-1, 1] to [0, 0.8]
+        # -1 = open (0), 1 = close (0.8)
+        gripper_ctrl = (gripper_action + 1.0) * 0.4  # Map to 0-0.8
+        gripper_ctrl = np.clip(gripper_ctrl, 0, 0.8)
         self.data.ctrl[6] = gripper_ctrl
 
         # Step simulation

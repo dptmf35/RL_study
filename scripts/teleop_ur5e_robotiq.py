@@ -126,7 +126,7 @@ class TeleopController:
                         for jid in self.joint_ids])
 
     def get_gripper_position(self):
-        """Get current gripper position (0=open, 0.8=closed)."""
+        """Get current gripper joint position (0=open, ~0.8=closed)."""
         return self.data.qpos[self.model.jnt_qposadr[self.gripper_joint_id]]
 
     def print_state(self):
@@ -157,8 +157,8 @@ class TeleopController:
         self.data.ctrl[joint_idx] = new_value
 
     def set_gripper(self, value):
-        """Set gripper to specific value (0=open, 255=closed)."""
-        self.gripper_target = np.clip(value, 0, 255)
+        """Set gripper to specific value (0=open, 0.8=closed)."""
+        self.gripper_target = np.clip(value, 0, 0.8)
         self.data.ctrl[6] = self.gripper_target
 
     def key_callback(self, key):
@@ -191,13 +191,13 @@ class TeleopController:
         elif key == ord('y') or key == ord('Y'):
             self.apply_joint_delta(5, -self.joint_delta)
 
-        # Gripper controls
+        # Gripper controls (0=open, 0.8=closed)
         elif key == ord('o') or key == ord('O'):
             self.set_gripper(0)  # Open
-            print("Gripper: OPEN")
+            print("Gripper: OPEN (0)")
         elif key == ord('c') or key == ord('C'):
-            self.set_gripper(255)  # Close
-            print("Gripper: CLOSE")
+            self.set_gripper(0.8)  # Close
+            print("Gripper: CLOSE (0.8)")
 
         # Environment controls
         elif key == ord(' '):  # Space

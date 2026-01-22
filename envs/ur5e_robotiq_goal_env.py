@@ -197,19 +197,33 @@ class UR5eRobotiqGoalEnv(gym.Env):
 
         This method is called by HER to recompute rewards with hindsight goals.
         Must be vectorized (can handle batch of goals).
+
+        Reward structure:
+        - Sparse: -1 if not at goal, 0 if at goal (Fetch style)
+        - Dense: -distance with time bonus for quick success
         """
         # Handle batch dimension
         if achieved_goal.ndim == 1:
             distance = np.linalg.norm(achieved_goal - desired_goal)
+            is_success = distance < self.distance_threshold
         else:
             distance = np.linalg.norm(achieved_goal - desired_goal, axis=-1)
+            is_success = distance < self.distance_threshold
 
         if self.reward_type == "sparse":
             # Sparse reward: -1 if not at goal, 0 if at goal (Fetch style)
             return -(distance > self.distance_threshold).astype(np.float32)
         else:
-            # Dense reward: negative distance
-            return -distance.astype(np.float32)
+            # Dense reward with time bonus and distance penalty
+            reward = -distance.astype(np.float32)
+
+            # Time bonus: reward quick success (only for single samples, not batches)
+            if achieved_goal.ndim == 1 and is_success:
+                # Bonus inversely proportional to steps taken (max 1.0 at step 1)
+                time_bonus = max(0, 1.0 - (self.current_step / self.max_episode_steps))
+                reward = reward + time_bonus
+
+            return reward
 
     def _is_success(self, achieved_goal: np.ndarray, desired_goal: np.ndarray) -> bool:
         """Check if goal is achieved."""
@@ -292,9 +306,10 @@ class UR5eRobotiqGoalEnv(gym.Env):
         # Set control targets
         self.data.ctrl[:6] = target_joint_pos
 
-        # Gripper control: map [-1, 1] to [0, 255]
-        gripper_ctrl = (gripper_action + 1.0) * 127.5
-        gripper_ctrl = np.clip(gripper_ctrl, 0, 255)
+        # Gripper control: map [-1, 1] to [0, 0.8]
+        # -1 = open (0), 1 = close (0.8)
+        gripper_ctrl = (gripper_action + 1.0) * 0.4  # Map to 0-0.8
+        gripper_ctrl = np.clip(gripper_ctrl, 0, 0.8)
         self.data.ctrl[6] = gripper_ctrl
 
         # Step simulation
@@ -311,6 +326,20 @@ class UR5eRobotiqGoalEnv(gym.Env):
         # Check termination
         terminated = info["is_success"]
         truncated = self.current_step >= self.max_episode_steps
+
+        # Distance penalty on episode end (truncation without success)
+        if truncated and not terminated:
+            # Penalty proportional to remaining distance (max -10 at max distance)
+            distance = info["distance"]
+            distance_penalty = -10.0 * min(distance, 1.0)  # Cap at 1m distance
+            reward = reward + distance_penalty
+            info["distance_penalty"] = distance_penalty
+
+        # Time bonus on success
+        if terminated:
+            time_bonus = max(0, 1.0 - (self.current_step / self.max_episode_steps))
+            reward = reward + time_bonus
+            info["time_bonus"] = time_bonus
 
         return obs, float(reward), terminated, truncated, info
 
