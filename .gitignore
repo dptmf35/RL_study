@@ -10,6 +10,7 @@ mujoco/
 models/
 Gymnasium-Robotics/
 mujoco_menagerie/
+ur5_reinforcement_learning_grasp_object/
 
 # datafiles
 *.xml
