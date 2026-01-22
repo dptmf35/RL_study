@@ -61,15 +61,21 @@ class TensorboardCallback(BaseCallback):
 
 
 def make_env(rank: int, seed: int = 0, reward_type: str = "dense",
-             task_mode: str = "pick_place", easy_mode: bool = False):
+             task_mode: str = "pick_place", easy_mode: bool = False,
+             max_episode_steps: int = 200):
     """Create a wrapped, monitored environment."""
 
     def _init():
+        # Use shorter episodes for reach task, longer for pick/place
+        steps = max_episode_steps
+        if task_mode == "reach":
+            steps = min(steps, 200)  # Reach doesn't need long episodes
+
         env = UR5eRobotiqPickPlaceEnv(
             render_mode=None,
-            max_episode_steps=500,
+            max_episode_steps=steps,
             reward_type=reward_type,
-            randomize_cube=True,
+            randomize_cube=True,  # Keep randomization for generalization
             randomize_target=False,
             task_mode=task_mode,
             easy_mode=easy_mode,
@@ -83,6 +89,19 @@ def make_env(rank: int, seed: int = 0, reward_type: str = "dense",
 
 def train(args):
     """Main training function."""
+    # Adjust hyperparameters based on task mode if not explicitly set
+    if args.task_mode == "reach":
+        # Reach is simpler, can use smaller values
+        if args.total_timesteps == 2_000_000:  # Default value
+            args.total_timesteps = 300_000  # Reach needs fewer steps
+        if args.n_steps == 2048:
+            args.n_steps = 512  # Shorter rollouts, more frequent updates
+        if args.ent_coef == 0.02:
+            args.ent_coef = 0.005  # Less exploration after initial phase
+        # Use higher gamma for short episodes
+        if args.gamma == 0.99:
+            args.gamma = 0.98
+
     # Create output directories
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     easy_str = "_easy" if args.easy_mode else ""
@@ -100,25 +119,27 @@ def train(args):
     print(f"Models: {model_dir}")
 
     # Create vectorized environment
+    # Shorter episodes like Fetch (50 steps) - faster learning, less reward hacking
+    max_steps = 100 if args.task_mode == "reach" else 150
     if args.n_envs > 1:
         env = SubprocVecEnv(
-            [make_env(i, args.seed, args.reward_type, args.task_mode, args.easy_mode)
+            [make_env(i, args.seed, args.reward_type, args.task_mode, args.easy_mode, max_steps)
              for i in range(args.n_envs)]
         )
     else:
-        env = DummyVecEnv([make_env(0, args.seed, args.reward_type, args.task_mode, args.easy_mode)])
+        env = DummyVecEnv([make_env(0, args.seed, args.reward_type, args.task_mode, args.easy_mode, max_steps)])
 
-    # Normalize observations and rewards
+    # Normalize observations only (NOT rewards - causes training instability)
+    # Fetch environments also don't normalize rewards
     env = VecNormalize(
         env,
         norm_obs=True,
-        norm_reward=True,
+        norm_reward=False,  # CRITICAL: Don't normalize rewards
         clip_obs=10.0,
-        clip_reward=10.0,
     )
 
     # Create evaluation environment
-    eval_env = DummyVecEnv([make_env(0, args.seed + 1000, args.reward_type, args.task_mode, args.easy_mode)])
+    eval_env = DummyVecEnv([make_env(0, args.seed + 1000, args.reward_type, args.task_mode, args.easy_mode, max_steps)])
     eval_env = VecNormalize(
         eval_env,
         norm_obs=True,
@@ -128,13 +149,23 @@ def train(args):
     )
 
     # Define network architecture
-    policy_kwargs = dict(
-        net_arch=dict(
-            pi=[256, 256, 128],
-            vf=[256, 256, 128],
-        ),
-        activation_fn=torch.nn.ReLU,
-    )
+    # Smaller network for reach task, larger for complex tasks
+    if args.task_mode == "reach":
+        policy_kwargs = dict(
+            net_arch=dict(
+                pi=[128, 128],
+                vf=[128, 128],
+            ),
+            activation_fn=torch.nn.Tanh,  # Tanh often works better for continuous control
+        )
+    else:
+        policy_kwargs = dict(
+            net_arch=dict(
+                pi=[256, 256],
+                vf=[256, 256],
+            ),
+            activation_fn=torch.nn.Tanh,
+        )
 
     # Create PPO agent
     model = PPO(
