@@ -107,9 +107,20 @@ def evaluate_model(args):
                     success = info[0].get('is_success', False)
                     threshold = 0.05
                     status = "✓" if dist < threshold else " "
-                    print(f"  Step {episode_length:3d} | Dist: {dist:.4f}m {status}| "
-                          f"Threshold: {threshold}m | Success: {success} | "
-                          f"Reward: {reward[0]:6.2f}")
+
+                    # Pick task specific output
+                    if args.task_mode == "pick":
+                        cube_z = info[0].get('cube_z', 0)
+                        phase = info[0].get('pick_phase', 0)
+                        hold = info[0].get('lift_hold_steps', 0)
+                        lifted = info[0].get('cube_lifted', False)
+                        print(f"  Step {episode_length:3d} | Phase: {phase} | Dist: {dist:.4f}m {status}| "
+                              f"Cube Z: {cube_z:.3f}m | Lifted: {lifted} | Hold: {hold}/10 | "
+                              f"Success: {success}")
+                    else:
+                        print(f"  Step {episode_length:3d} | Dist: {dist:.4f}m {status}| "
+                              f"Threshold: {threshold}m | Success: {success} | "
+                              f"Reward: {reward[0]:6.2f}")
                 else:
                     # Standard env info format
                     dist = info[0].get('distance_to_cube', 0)

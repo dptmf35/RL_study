@@ -131,6 +131,8 @@ class UR5eRobotiqGoalEnv(gym.Env):
         # Grasp state tracking for pick task
         self._gripper_closed = False
         self._pick_phase = 0  # 0: reach cube, 1: lift cube
+        self._lift_hold_steps = 0  # Count steps cube is held at lifted height
+        self._lift_hold_required = 10  # Must hold for N steps to count as success
 
         # Rendering
         self.viewer = None
@@ -225,10 +227,13 @@ class UR5eRobotiqGoalEnv(gym.Env):
         distance = np.linalg.norm(achieved_goal - desired_goal)
 
         if self.task_mode == "pick":
-            # For pick: also check if cube is actually lifted (not just close to goal)
+            # For pick: cube must be lifted AND held for required duration
             cube_pos = self._get_cube_position()
-            cube_lifted = cube_pos[2] > 0.48  # At least 4cm above table (0.44)
-            return distance < self.distance_threshold and cube_lifted
+            # Cube must be at least 5.5cm above table (0.445 + 0.055 = 0.50)
+            cube_lifted = cube_pos[2] > 0.50
+            # Must hold lifted position for required steps
+            held_long_enough = self._lift_hold_steps >= self._lift_hold_required
+            return distance < self.distance_threshold and cube_lifted and held_long_enough
         else:
             return distance < self.distance_threshold
 
@@ -238,10 +243,21 @@ class UR5eRobotiqGoalEnv(gym.Env):
         achieved_goal = obs["achieved_goal"]
         desired_goal = obs["desired_goal"]
 
-        return {
+        info = {
             "is_success": self._is_success(achieved_goal, desired_goal),
             "distance": np.linalg.norm(achieved_goal - desired_goal),
         }
+
+        # Add pick-specific info
+        if self.task_mode == "pick":
+            cube_pos = self._get_cube_position()
+            info["cube_z"] = cube_pos[2]
+            info["cube_lifted"] = cube_pos[2] > 0.50
+            info["pick_phase"] = self._pick_phase
+            info["lift_hold_steps"] = self._lift_hold_steps
+            info["gripper_closed"] = self._gripper_closed
+
+        return info
 
     def reset(
         self,
@@ -286,6 +302,7 @@ class UR5eRobotiqGoalEnv(gym.Env):
         self.current_step = 0
         self._gripper_closed = False
         self._pick_phase = 0  # Start with reaching cube
+        self._lift_hold_steps = 0  # Reset hold counter
 
         return self._get_obs(), self._get_info()
 
@@ -346,6 +363,16 @@ class UR5eRobotiqGoalEnv(gym.Env):
         # Step simulation
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
+
+        # Update lift hold counter for pick task
+        if self.task_mode == "pick" and self._pick_phase == 1:
+            cube_pos = self._get_cube_position()
+            # Check if cube is lifted (5.5cm above table)
+            if cube_pos[2] > 0.50:
+                self._lift_hold_steps += 1
+            else:
+                # Reset counter if cube drops
+                self._lift_hold_steps = 0
 
         # Get observation
         obs = self._get_obs()

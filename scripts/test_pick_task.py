@@ -99,8 +99,9 @@ def test_pick_task():
         # Print progress
         if step % 30 == 0:
             cube_pos = env._get_cube_position()
+            hold = env._lift_hold_steps
             print(f"  Step {step}: phase={env._pick_phase}, dist={info['distance']:.4f}, "
-                  f"cube_z={cube_pos[2]:.4f}, "
+                  f"cube_z={cube_pos[2]:.4f}, hold={hold}/10, "
                   f"success={info['is_success']}")
 
         if terminated:
@@ -116,21 +117,27 @@ def test_pick_task():
     print("RESULTS")
     print("=" * 60)
     final_cube_z = env._get_cube_position()[2]
+    final_hold = env._lift_hold_steps
     print(f"  Gripper closed at step: {gripper_closed_step}")
     print(f"  Initial cube Z: {cube_initial_z:.4f}")
     print(f"  Final cube Z: {final_cube_z:.4f}")
     print(f"  Max cube Z: {max_cube_height:.4f}")
     print(f"  Cube lifted: {final_cube_z - cube_initial_z:.4f}m")
+    print(f"  Lift hold steps: {final_hold}/10 required")
     print(f"  Success: {info['is_success']}")
 
     if info['is_success']:
         print("\n  PICK TASK WORKING CORRECTLY!")
+    elif final_hold >= 10:
+        print("\n  Held long enough but distance check failed")
+    elif max_cube_height > 0.50:
+        print("\n  Cube lifted to 0.50+ but not held long enough")
     elif max_cube_height > cube_initial_z + 0.02:
-        print("\n  Cube was lifted but not enough for success threshold")
+        print("\n  Cube was lifted but not high enough (need > 0.50m)")
     elif gripper_closed_step is not None:
         print("\n  Gripper closed but cube not lifted - check grasp physics")
     else:
-        print("\n  Gripper never closed - check horizontal alignment logic")
+        print("\n  Gripper never closed - check reach to cube")
 
     print("=" * 60)
 
