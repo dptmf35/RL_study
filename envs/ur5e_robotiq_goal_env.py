@@ -128,6 +128,10 @@ class UR5eRobotiqGoalEnv(gym.Env):
         self.current_step = 0
         self.goal = np.zeros(3)
 
+        # Grasp state tracking for pick task
+        self._gripper_closed = False
+        self._pick_phase = 0  # 0: reach cube, 1: lift cube
+
         # Rendering
         self.viewer = None
         self._render_context = None
@@ -159,12 +163,11 @@ class UR5eRobotiqGoalEnv(gym.Env):
             ee_pos,           # 3
         ]).astype(np.float32)
 
-        # Achieved goal depends on task
-        if self.task_mode == "reach":
-            # For reach: achieved_goal is EE position
+        # For reach and pick: achieved_goal is EE position (agent learns to move EE)
+        # For pick_place: achieved_goal is cube position (agent learns to move cube)
+        if self.task_mode in ["reach", "pick"]:
             achieved_goal = ee_pos.astype(np.float32)
         else:
-            # For pick/place: achieved_goal is cube position
             achieved_goal = self._get_cube_position().astype(np.float32)
 
         return {
@@ -179,9 +182,11 @@ class UR5eRobotiqGoalEnv(gym.Env):
             # Goal is cube position (we want EE to reach the cube)
             return self._get_cube_position()
         elif self.task_mode == "pick":
-            # Goal is a lifted position above the table
-            cube_pos = self._get_cube_position()
-            return np.array([cube_pos[0], cube_pos[1], 0.55])  # 10cm above table
+            # Two-phase goal:
+            # Phase 0: Goal is cube position (reach down to cube)
+            # Phase 1: Goal is above cube (lift up)
+            # Initial goal is always cube position
+            return self._get_cube_position()
         else:  # pick_place
             # Goal is target location
             return self.data.site_xpos[self.target_site_id].copy()
@@ -200,35 +205,32 @@ class UR5eRobotiqGoalEnv(gym.Env):
 
         Reward structure:
         - Sparse: -1 if not at goal, 0 if at goal (Fetch style)
-        - Dense: -distance with time bonus for quick success
+        - Dense: -distance (simple, like ur5_env.py)
         """
         # Handle batch dimension
         if achieved_goal.ndim == 1:
             distance = np.linalg.norm(achieved_goal - desired_goal)
-            is_success = distance < self.distance_threshold
         else:
             distance = np.linalg.norm(achieved_goal - desired_goal, axis=-1)
-            is_success = distance < self.distance_threshold
 
         if self.reward_type == "sparse":
             # Sparse reward: -1 if not at goal, 0 if at goal (Fetch style)
             return -(distance > self.distance_threshold).astype(np.float32)
         else:
-            # Dense reward with time bonus and distance penalty
-            reward = -distance.astype(np.float32)
-
-            # Time bonus: reward quick success (only for single samples, not batches)
-            if achieved_goal.ndim == 1 and is_success:
-                # Bonus inversely proportional to steps taken (max 1.0 at step 1)
-                time_bonus = max(0, 1.0 - (self.current_step / self.max_episode_steps))
-                reward = reward + time_bonus
-
-            return reward
+            # Dense reward: simple negative distance (like ur5_env.py: -10 * distance)
+            return (-10.0 * distance).astype(np.float32)
 
     def _is_success(self, achieved_goal: np.ndarray, desired_goal: np.ndarray) -> bool:
         """Check if goal is achieved."""
         distance = np.linalg.norm(achieved_goal - desired_goal)
-        return distance < self.distance_threshold
+
+        if self.task_mode == "pick":
+            # For pick: also check if cube is actually lifted (not just close to goal)
+            cube_pos = self._get_cube_position()
+            cube_lifted = cube_pos[2] > 0.48  # At least 4cm above table (0.44)
+            return distance < self.distance_threshold and cube_lifted
+        else:
+            return distance < self.distance_threshold
 
     def _get_info(self) -> Dict[str, Any]:
         """Get additional info."""
@@ -282,6 +284,8 @@ class UR5eRobotiqGoalEnv(gym.Env):
 
         # Reset episode tracking
         self.current_step = 0
+        self._gripper_closed = False
+        self._pick_phase = 0  # Start with reaching cube
 
         return self._get_obs(), self._get_info()
 
@@ -306,11 +310,38 @@ class UR5eRobotiqGoalEnv(gym.Env):
         # Set control targets
         self.data.ctrl[:6] = target_joint_pos
 
-        # Gripper control: map [-1, 1] to [0, 0.8]
-        # -1 = open (0), 1 = close (0.8)
-        gripper_ctrl = (gripper_action + 1.0) * 0.4  # Map to 0-0.8
-        gripper_ctrl = np.clip(gripper_ctrl, 0, 0.8)
-        self.data.ctrl[6] = gripper_ctrl
+        # Gripper control strategy depends on task mode
+        if self.task_mode == "reach":
+            # Reach: ignore gripper action, keep open
+            self.data.ctrl[6] = 0
+        elif self.task_mode == "pick":
+            # Pick: two-phase approach
+            # Phase 0: Reach cube (goal = cube position), gripper open
+            # Phase 1: Lift cube (goal = above cube), gripper closed
+            ee_pos = self._get_ee_position()
+            cube_pos = self._get_cube_position()
+
+            if self._pick_phase == 0:
+                # Phase 0: Reaching cube
+                dist_to_cube = np.linalg.norm(ee_pos - cube_pos)
+
+                if dist_to_cube < 0.05:  # Close enough to grasp (5cm 3D distance)
+                    # Close gripper and transition to lift phase
+                    self.data.ctrl[6] = 0.8
+                    self._gripper_closed = True
+                    self._pick_phase = 1
+                    # Update goal to lifted position
+                    self.goal = np.array([cube_pos[0], cube_pos[1], cube_pos[2] + 0.10])
+                else:
+                    self.data.ctrl[6] = 0  # Keep open while approaching
+            else:
+                # Phase 1: Lifting cube - keep gripper closed
+                self.data.ctrl[6] = 0.8
+        else:
+            # pick_place: use learned gripper action
+            gripper_ctrl = (gripper_action + 1.0) * 0.4  # Map to 0-0.8
+            gripper_ctrl = np.clip(gripper_ctrl, 0, 0.8)
+            self.data.ctrl[6] = gripper_ctrl
 
         # Step simulation
         for _ in range(self.frame_skip):
@@ -329,15 +360,14 @@ class UR5eRobotiqGoalEnv(gym.Env):
 
         # Distance penalty on episode end (truncation without success)
         if truncated and not terminated:
-            # Penalty proportional to remaining distance (max -10 at max distance)
             distance = info["distance"]
-            distance_penalty = -10.0 * min(distance, 1.0)  # Cap at 1m distance
+            distance_penalty = -10.0 * min(distance, 1.0)
             reward = reward + distance_penalty
             info["distance_penalty"] = distance_penalty
 
         # Time bonus on success
         if terminated:
-            time_bonus = max(0, 1.0 - (self.current_step / self.max_episode_steps))
+            time_bonus = 10.0 * max(0, 1.0 - (self.current_step / self.max_episode_steps))
             reward = reward + time_bonus
             info["time_bonus"] = time_bonus
 
