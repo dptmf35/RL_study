@@ -1,0 +1,13 @@
+# Default hyperparameters for DSR H2017 alignment PPO training
+total_timesteps: 200000
+n_envs: 4
+learning_rate: 0.0003
+n_steps: 1024
+batch_size: 256
+n_epochs: 10
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.01
+vf_coef: 0.5
+max_grad_norm: 0.5
