@@ -2,11 +2,13 @@
 Evaluation and Visualization Script for Go2 Locomotion Policy.
 
 Loads a trained policy and visualizes it in MuJoCo's interactive viewer.
+Supports both flat and terrain environments.
 
 Usage:
     python eval.py --model checkpoints/<run>/best_model.zip
+    python eval.py --model checkpoints/<run>/best_model.zip --terrain
+    python eval.py --model checkpoints/<run>/best_model.zip --no-viewer
     python eval.py --model checkpoints/<run>/best_model.zip --record video.mp4
-    python eval.py --model checkpoints/<run>/best_model.zip --no-viewer  # headless stats
 """
 
 import os
@@ -21,17 +23,16 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 sys.path.insert(0, os.path.dirname(__file__))
-from envs.go2_env import Go2Env, DEFAULT_SCENE_XML
+from envs.go2_env import Go2Env
+from envs.go2_terrain_env import Go2TerrainEnv
 
 
 def load_model_and_vecnorm(model_path):
     """Load trained PPO model and VecNormalize stats."""
     model = PPO.load(model_path, device="cpu")
 
-    # Try loading VecNormalize
     vecnorm_path = model_path.replace(".zip", "_vecnormalize.pkl")
     if not os.path.exists(vecnorm_path):
-        # Try looking in same directory
         model_dir = os.path.dirname(model_path)
         for f in os.listdir(model_dir):
             if f.endswith("_vecnormalize.pkl"):
@@ -41,11 +42,18 @@ def load_model_and_vecnorm(model_path):
     return model, vecnorm_path
 
 
-def evaluate_headless(model_path, n_episodes=10):
+def make_env(use_terrain=False, difficulty=0.5, **kwargs):
+    """Create environment based on mode."""
+    if use_terrain:
+        return Go2TerrainEnv(difficulty=difficulty, **kwargs)
+    return Go2Env(**kwargs)
+
+
+def evaluate_headless(model_path, n_episodes=10, use_terrain=False, difficulty=0.5):
     """Run evaluation without visualization, print statistics."""
     model, vecnorm_path = load_model_and_vecnorm(model_path)
 
-    env = DummyVecEnv([lambda: Go2Env()])
+    env = DummyVecEnv([lambda: make_env(use_terrain, difficulty)])
     if os.path.exists(vecnorm_path):
         env = VecNormalize.load(vecnorm_path, env)
         env.training = False
@@ -84,40 +92,39 @@ def evaluate_headless(model_path, n_episodes=10):
     env.close()
 
     print(f"\n=== Evaluation Results ({n_episodes} episodes) ===")
+    print(f"  Mode         : {'terrain' if use_terrain else 'flat'}")
     print(f"  Mean reward  : {np.mean(episode_rewards):.2f} +/- {np.std(episode_rewards):.2f}")
     print(f"  Mean length  : {np.mean(episode_lengths):.1f} +/- {np.std(episode_lengths):.1f}")
     print(f"  Mean forward : {np.mean(forward_distances):.2f}m +/- {np.std(forward_distances):.2f}m")
 
 
-def visualize_interactive(model_path, cmd_vx=0.5, cmd_vy=0.0, cmd_yaw=0.0):
+def visualize_interactive(model_path, cmd_vx=0.5, cmd_vy=0.0, cmd_yaw=0.0,
+                          use_terrain=False, difficulty=0.5):
     """Visualize policy in MuJoCo interactive viewer."""
     model_ppo, vecnorm_path = load_model_and_vecnorm(model_path)
 
-    # Create environment for normalization
-    vec_env = DummyVecEnv([lambda: Go2Env()])
+    # VecNormalize wrapper for observation normalization
+    vec_env = DummyVecEnv([lambda: make_env(use_terrain, difficulty)])
     if os.path.exists(vecnorm_path):
         vec_env = VecNormalize.load(vecnorm_path, vec_env)
         vec_env.training = False
         vec_env.norm_reward = False
         print(f"Loaded VecNormalize from: {vecnorm_path}")
 
-    # Create raw environment for MuJoCo viewer
-    env = Go2Env()
+    # Raw environment for viewer
+    env = make_env(use_terrain, difficulty)
     obs, info = env.reset()
-
-    # Override command
     env._command = np.array([cmd_vx, cmd_vy, cmd_yaw])
 
-    print(f"\n=== Interactive Visualization ===")
+    mode = "terrain" if use_terrain else "flat"
+    print(f"\n=== Interactive Visualization ({mode}) ===")
     print(f"  Command: vx={cmd_vx:.2f}, vy={cmd_vy:.2f}, yaw={cmd_yaw:.2f}")
     print(f"  Close the viewer window to exit.")
     print()
 
     def normalize_obs(obs):
-        """Normalize observation using VecNormalize statistics."""
         if isinstance(vec_env, VecNormalize):
-            obs_normalized = vec_env.normalize_obs(obs.reshape(1, -1))
-            return obs_normalized.flatten()
+            return vec_env.normalize_obs(obs.reshape(1, -1)).flatten()
         return obs
 
     total_reward = 0.0
@@ -127,17 +134,14 @@ def visualize_interactive(model_path, cmd_vx=0.5, cmd_vy=0.0, cmd_yaw=0.0):
         while viewer.is_running():
             step_start = time.time()
 
-            # Normalize obs and get action
             obs_norm = normalize_obs(obs)
             action, _ = model_ppo.predict(obs_norm.reshape(1, -1), deterministic=True)
             action = action.flatten()
 
-            # Step environment
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
             step_count += 1
 
-            # Reset if needed
             if terminated or truncated:
                 print(f"  Episode done: steps={step_count}, reward={total_reward:.2f}, "
                       f"forward={info['base_pos'][0]:.2f}m")
@@ -146,10 +150,8 @@ def visualize_interactive(model_path, cmd_vx=0.5, cmd_vy=0.0, cmd_yaw=0.0):
                 total_reward = 0.0
                 step_count = 0
 
-            # Sync viewer
             viewer.sync()
 
-            # Real-time sync
             elapsed = time.time() - step_start
             sleep_time = env.control_dt - elapsed
             if sleep_time > 0:
@@ -159,7 +161,8 @@ def visualize_interactive(model_path, cmd_vx=0.5, cmd_vy=0.0, cmd_yaw=0.0):
     vec_env.close()
 
 
-def record_video(model_path, output_path, n_steps=500, cmd_vx=0.5):
+def record_video(model_path, output_path, n_steps=500, cmd_vx=0.5,
+                 use_terrain=False, difficulty=0.5):
     """Record a video of the policy running."""
     try:
         import mediapy as media
@@ -169,13 +172,13 @@ def record_video(model_path, output_path, n_steps=500, cmd_vx=0.5):
 
     model_ppo, vecnorm_path = load_model_and_vecnorm(model_path)
 
-    vec_env = DummyVecEnv([lambda: Go2Env()])
+    vec_env = DummyVecEnv([lambda: make_env(use_terrain, difficulty)])
     if os.path.exists(vecnorm_path):
         vec_env = VecNormalize.load(vecnorm_path, vec_env)
         vec_env.training = False
         vec_env.norm_reward = False
 
-    env = Go2Env(render_mode="rgb_array")
+    env = make_env(use_terrain, difficulty, render_mode="rgb_array")
     obs, info = env.reset()
     env._command = np.array([cmd_vx, 0.0, 0.0])
 
@@ -191,7 +194,7 @@ def record_video(model_path, output_path, n_steps=500, cmd_vx=0.5):
         action, _ = model_ppo.predict(obs_norm.reshape(1, -1), deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action.flatten())
 
-        renderer.update_scene(env.data, camera="track")
+        renderer.update_scene(env.data)
         frames.append(renderer.render())
 
         if terminated or truncated:
@@ -215,12 +218,17 @@ if __name__ == "__main__":
     parser.add_argument("--cmd_vx", type=float, default=0.5, help="Forward velocity command")
     parser.add_argument("--cmd_vy", type=float, default=0.0, help="Lateral velocity command")
     parser.add_argument("--cmd_yaw", type=float, default=0.0, help="Yaw rate command")
+    parser.add_argument("--terrain", action="store_true", help="Use terrain environment")
+    parser.add_argument("--difficulty", type=float, default=0.5, help="Terrain difficulty (0-1)")
     args = parser.parse_args()
 
     if args.record:
-        record_video(args.model, args.record, cmd_vx=args.cmd_vx)
+        record_video(args.model, args.record, cmd_vx=args.cmd_vx,
+                     use_terrain=args.terrain, difficulty=args.difficulty)
     elif args.no_viewer:
-        evaluate_headless(args.model, n_episodes=args.episodes)
+        evaluate_headless(args.model, n_episodes=args.episodes,
+                         use_terrain=args.terrain, difficulty=args.difficulty)
     else:
         visualize_interactive(args.model, cmd_vx=args.cmd_vx,
-                            cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw)
+                            cmd_vy=args.cmd_vy, cmd_yaw=args.cmd_yaw,
+                            use_terrain=args.terrain, difficulty=args.difficulty)

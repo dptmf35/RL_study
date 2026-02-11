@@ -29,6 +29,12 @@ TRAIN_CONFIG = {
         "min_base_height": 0.15,
     },
 
+    # Terrain-specific env config (extra keys for Go2TerrainEnv)
+    "terrain_env": {
+        "difficulty": 0.5,
+        "terrain_seed": None,
+    },
+
     # PPO hyperparameters
     "ppo": {
         "learning_rate": 3e-4,
