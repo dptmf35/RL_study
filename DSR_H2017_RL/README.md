@@ -54,10 +54,13 @@ DSR_H2017_RL/
 │   └── align_default.yaml          # Baseline PPO hyperparameters
 ├── envs/
 │   ├── __init__.py
-│   └── dsr_h2017_align_env.py      # Gymnasium environment (alignment task)
+│   ├── dsr_h2017_align_env.py      # Gymnasium environment (alignment task, PPO용)
+│   └── dsr_h2017_goal_env.py       # GoalEnv (SAC+HER용, Dict obs space)
 ├── scripts/
 │   ├── train_ppo_align.py          # PPO training entry point
-│   └── evaluate_align.py           # CLI for evaluation / random rollouts
+│   ├── train_sac_her_align.py      # SAC+HER training entry point
+│   ├── evaluate_align.py           # PPO 모델 평가 / random rollouts
+│   └── evaluate_sac_her.py         # SAC+HER 모델 평가 (GoalEnv)
 ├── utils/
 │   └── merge_gripper.py            # Utility used to merge MJCF assets
 ├── logs/                           # TensorBoard logs (created at runtime)
@@ -78,6 +81,10 @@ Asset directories originate from `/home/yeseul/Desktop/doosan_ws/src/doosan-robo
   - **Time penalty**: -0.01/step — 빠른 완료 유도
   - ~~Coarse/Tight align bonuses~~ → **제거됨** (reward hacking 방지)
   - **Success 조건**: XY < 4cm, 높이 오차 ±2cm 이내, 그리퍼 open
+- **Home position 랜덤화** (`--randomize-home`):
+  - 매 에피소드마다 home joint 값에 uniform noise ±0.15 rad (~8.6°) 추가
+  - Joint limits 내로 클리핑하여 안전 보장
+  - `--home-noise-scale`로 난이도 조절 (0.1=쉬움, 0.3=어려움)
 - **Termination**: success flag triggers episode termination; otherwise episodes truncate at 300 steps.
 
 ### Reward Hacking 방지 설계
@@ -109,6 +116,13 @@ python3 scripts/train_ppo_align.py \
   --n-envs 4 \
   --log-dir logs \
   --model-dir models
+
+# Home position 랜덤화로 일반화 능력 향상
+python3 scripts/train_ppo_align.py \
+  --total-timesteps 500000 \
+  --n-envs 4 \
+  --randomize-home \
+  --home-noise-scale 0.15
 ```
 
 ### PPO Hyperparameters
@@ -139,20 +153,106 @@ python3 scripts/train_ppo_align.py \
 
 All checkpoints are written under `models/<run_name>/` with `best/` (highest eval reward) and `final_model.zip`, plus VecNormalize statistics.
 
-## Evaluation & Visualisation
+### SAC + HER Training
+
+SAC (Soft Actor-Critic) + HER (Hindsight Experience Replay)는 sparse reward 환경에서 효과적인 알고리즘입니다.
+Gymnasium-Robotics Fetch 환경과 동일한 GoalEnv 패턴을 사용합니다.
 
 ```bash
-# Deterministic policy rollout (no rendering)
-python3 scripts/evaluate_align.py \
-  --model-path models/<run_name>/final_model.zip \
-  --n-episodes 5 \
-  --no-render
+# Sparse reward (기본, Fetch 스타일: -1/0)
+python3 scripts/train_sac_her_align.py --total-timesteps 100000
 
-# Random policy demo with viewer
-python3 scripts/evaluate_align.py --random --render --n-episodes 2
+# Dense reward (-distance 기반)
+python3 scripts/train_sac_her_align.py --reward-type dense --total-timesteps 200000
+
+# Home position 랜덤화 + Dense reward (고난이도)
+python3 scripts/train_sac_her_align.py \
+  --reward-type dense \
+  --total-timesteps 300000 \
+  --randomize-home \
+  --home-noise-scale 0.15
+
+# 커스텀 설정
+python3 scripts/train_sac_her_align.py \
+  --total-timesteps 200000 \
+  --learning-rate 1e-3 \
+  --batch-size 256 \
+  --gamma 0.95
 ```
 
-The evaluator automatically loads `vec_normalize.pkl` if found alongside the model.
+#### GoalEnv 구조 (`dsr_h2017_goal_env.py`)
+
+HER을 사용하기 위한 Dict observation space를 제공합니다:
+
+| Key | 차원 | 내용 |
+|-----|------|------|
+| `observation` | 16 | joint_pos(6) + joint_vel(6) + gripper(1) + ee_pos(3) |
+| `achieved_goal` | 3 | 현재 end-effector XYZ 위치 |
+| `desired_goal` | 3 | 목표 위치 (큐브 위 10cm) |
+
+**Reward**:
+- **Sparse** (기본): 목표 도달 시 `0`, 미도달 시 `-1` (Fetch 스타일)
+- **Dense**: `-10.0 × distance`
+
+**HER 동작 원리**: 실패한 에피소드에서 실제 도달한 위치를 "가상 목표"로 재라벨링하여 학습 효율을 높입니다.
+`FUTURE` 전략으로 현재 시점 이후에 달성된 goal을 샘플링합니다 (`n_sampled_goal=4`).
+
+#### SAC + HER Hyperparameters
+
+| 파라미터 | 기본값 | 설명 |
+|---------|--------|------|
+| `total_timesteps` | 100,000 | 총 학습 스텝 |
+| `learning_rate` | 1e-3 | 학습률 |
+| `buffer_size` | 1,000,000 | Replay buffer 크기 |
+| `batch_size` | 256 | 미니배치 크기 |
+| `tau` | 0.05 | Target network soft update 계수 |
+| `gamma` | 0.95 | 할인 계수 |
+| `n_sampled_goal` | 4 | HER 가상 목표 수 (transition당) |
+| `goal_selection` | FUTURE | HER goal selection 전략 |
+
+**Policy**: `MultiInputPolicy` (Dict obs space 지원), SAC의 자동 엔트로피 튜닝 사용.
+
+#### PPO vs SAC+HER 비교
+
+| 특성 | PPO (Dense) | SAC+HER (Sparse) |
+|------|-------------|-------------------|
+| **환경** | `DSRH2017AlignEnv` | `DSRH2017GoalEnv` |
+| **보상 설계** | 수동 reward shaping 필요 | Sparse (-1/0)로 간단 |
+| **샘플 효율** | On-policy (낮음) | Off-policy + HER (높음) |
+| **병렬 환경** | 지원 (SubprocVecEnv) | 단일 환경 (HER 제약) |
+| **Reward hacking** | 취약 (보상 설계 의존) | 강건 (sparse reward) |
+| **적합한 경우** | Dense reward로 빠른 초기 학습 | Sparse reward로 안정적 학습 |
+
+## Evaluation & Visualisation
+
+### PPO 모델 평가
+```bash
+python3 scripts/evaluate_align.py \
+  --model-path models/<run_name>/final_model.zip \
+  --n-episodes 5
+
+# Random policy demo
+python3 scripts/evaluate_align.py --random --n-episodes 2
+```
+
+### SAC+HER 모델 평가
+```bash
+python3 scripts/evaluate_sac_her.py \
+  --model-path models/<run_name>/best/best_model.zip \
+  --n-episodes 10
+
+# Dense reward로 학습한 모델
+python3 scripts/evaluate_sac_her.py \
+  --model-path models/<run_name>/best/best_model.zip \
+  --reward-type dense --n-episodes 10
+
+# Random policy baseline
+python3 scripts/evaluate_sac_her.py --random --n-episodes 5
+```
+
+> **Note**: PPO 모델은 `evaluate_align.py`, SAC+HER 모델은 `evaluate_sac_her.py`를 사용하세요. observation space가 다릅니다 (Box 28-dim vs Dict 16+3+3).
+
+The PPO evaluator automatically loads `vec_normalize.pkl` if found alongside the model.
 
 ## 🎮 Manual Teleoperation
 
@@ -214,6 +314,7 @@ Expected output (`check_arm_horizontal.py`):
 ## Acknowledgements
 
 - Doosan robot & gripper MJCFs sourced from the `dsr_mujoco` ROS2 package.
-- Stable-Baselines3 (v2.0.0) provides the PPO implementation.
+- Stable-Baselines3 (v2.0.0) provides the PPO and SAC+HER implementations.
+- GoalEnv pattern inspired by [Gymnasium-Robotics Fetch environments](https://robotics.farama.org/).
 
 Feel free to iterate on rewards, spawn ranges, or policy architecture to push alignment performance further.

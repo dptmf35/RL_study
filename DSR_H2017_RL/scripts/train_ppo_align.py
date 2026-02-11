@@ -51,11 +51,16 @@ sys.path.insert(0, str(PROJECT_ROOT.parent))
 from DSR_H2017_RL.envs import AlignmentConfig, DSRH2017AlignEnv  # noqa: E402
 
 
-def make_env(rank: int, seed: int, render_mode: str | None = None):
+def make_env(rank: int, seed: int, render_mode: str | None = None,
+             randomize_home: bool = False, home_noise_scale: float = 0.15):
     """Create a thunk that builds a configured environment instance."""
 
     def _init():
-        env = DSRH2017AlignEnv(render_mode=render_mode, config=AlignmentConfig())
+        cfg = AlignmentConfig(
+            randomize_home=randomize_home,
+            home_noise_scale=home_noise_scale,
+        )
+        env = DSRH2017AlignEnv(render_mode=render_mode, config=cfg)
         env.reset(seed=seed + rank)
         return env
 
@@ -85,6 +90,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-freq", type=int, default=10_000)
     parser.add_argument("--n-eval-episodes", type=int, default=5)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--randomize-home", action="store_true",
+                        help="Randomize robot starting joint configuration each episode")
+    parser.add_argument("--home-noise-scale", type=float, default=0.15,
+                        help="Uniform noise range per joint in radians (default: 0.15, ~8.6 deg)")
     return parser.parse_args()
 
 
@@ -100,19 +109,24 @@ def main() -> None:
     model_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Training run: {run_name}")
+    print(f"Randomize home: {args.randomize_home} (noise={args.home_noise_scale:.2f} rad)")
     print(f"Logs:   {log_dir}")
     print(f"Models: {model_dir}")
 
+    env_kwargs = dict(randomize_home=args.randomize_home,
+                      home_noise_scale=args.home_noise_scale)
+
     if args.n_envs > 1:
         env = SubprocVecEnv(
-            [make_env(i, args.seed, render_mode=None) for i in range(args.n_envs)]
+            [make_env(i, args.seed, render_mode=None, **env_kwargs) for i in range(args.n_envs)]
         )
     else:
-        env = DummyVecEnv([make_env(0, args.seed, render_mode=None)])
+        env = DummyVecEnv([make_env(0, args.seed, render_mode=None, **env_kwargs)])
 
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.0)
 
-    eval_env = DummyVecEnv([make_env(1000, args.seed + 1000, render_mode=None)])
+    # Eval env: also randomize home to test generalization
+    eval_env = DummyVecEnv([make_env(1000, args.seed + 1000, render_mode=None, **env_kwargs)])
     eval_env = VecNormalize(eval_env, training=False, norm_obs=True, norm_reward=False)
 
     policy_kwargs = dict(

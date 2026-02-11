@@ -49,9 +49,11 @@ sys.path.insert(0, str(PROJECT_ROOT.parent))
 from DSR_H2017_RL.envs import AlignmentConfig, DSRH2017AlignEnv  # noqa: E402
 
 
-def build_env(render_mode: str | None) -> DummyVecEnv:
+def build_env(render_mode: str | None,
+              randomize_home: bool = False, home_noise_scale: float = 0.15) -> DummyVecEnv:
+    cfg = AlignmentConfig(randomize_home=randomize_home, home_noise_scale=home_noise_scale)
     return DummyVecEnv([
-        lambda: DSRH2017AlignEnv(render_mode=render_mode, config=AlignmentConfig())
+        lambda: DSRH2017AlignEnv(render_mode=render_mode, config=cfg)
     ])
 
 
@@ -67,11 +69,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--deterministic", action="store_true", default=True)
     parser.add_argument("--slow-motion", action="store_true")
     parser.add_argument("--random", action="store_true")
+    parser.add_argument("--randomize-home", action="store_true",
+                        help="Randomize robot starting pose each episode")
+    parser.add_argument("--home-noise-scale", type=float, default=0.15,
+                        help="Uniform noise per joint in radians (default: 0.15)")
     return parser.parse_args()
 
 
 def evaluate(args: argparse.Namespace) -> None:
-    env = build_env("human" if args.render else None)
+    env = build_env("human" if args.render else None,
+                    randomize_home=args.randomize_home,
+                    home_noise_scale=args.home_noise_scale)
 
     vecnorm_path = None
     if args.model_path is not None:

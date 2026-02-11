@@ -38,6 +38,8 @@ class AlignmentConfig:
     max_episode_steps: int = 300
     joint_delta_scale: float = 0.2  # Increased from 0.05 for faster movement
     frame_skip: int = 5
+    randomize_home: bool = False  # Randomize robot starting pose
+    home_noise_scale: float = 0.15  # Uniform noise range per joint (radians, ~8.6°)
 
 
 class DSRH2017AlignEnv(gym.Env):
@@ -235,9 +237,21 @@ class DSRH2017AlignEnv(gym.Env):
 
         mujoco.mj_resetData(self.model, self.data)
 
-        # Set arm to home configuration
+        # Set arm to home configuration (with optional randomization)
+        start_qpos = self.home_qpos.copy()
+        if self.cfg.randomize_home:
+            noise = self.np_random.uniform(
+                -self.cfg.home_noise_scale, self.cfg.home_noise_scale, size=6
+            )
+            start_qpos += noise
+            # Clip to joint limits
+            for i, jid in enumerate(self.arm_joint_ids):
+                jrange = self.model.jnt_range[jid]
+                if np.isfinite(jrange[0]) and np.isfinite(jrange[1]):
+                    start_qpos[i] = np.clip(start_qpos[i], jrange[0], jrange[1])
+
         for i, jid in enumerate(self.arm_joint_ids):
-            self.data.qpos[self.model.jnt_qposadr[jid]] = self.home_qpos[i]
+            self.data.qpos[self.model.jnt_qposadr[jid]] = start_qpos[i]
             self.data.qvel[self.model.jnt_dofadr[jid]] = 0.0
 
         # Open gripper
