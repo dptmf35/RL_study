@@ -2,66 +2,83 @@
 Go2 Locomotion Environment with Terrain Support.
 
 Extends Go2Env with:
-- Procedural heightfield terrain (slopes, stairs, rough)
-- Terrain-aware observations (foot heights + forward scan)
-- Terrain-relative rewards
+- Procedural heightfield terrain (visual display)
+- Terrain-relative rewards and termination
+- Same 45-dim observation space as flat env (compatible with flat model)
+
+Note: Physics uses a flat plane floor. The heightfield is visual only due to
+MuJoCo heightfield contact normal issues with small sphere colliders.
 """
 
 import numpy as np
 import mujoco
-from gymnasium import spaces
 
 from envs.go2_env import Go2Env, NUM_JOINTS
 from envs.terrain import TerrainGenerator, ensure_terrain_scene_xml
 
 
 class Go2TerrainEnv(Go2Env):
-    """Go2 environment with heightfield terrain.
+    """Go2 environment with visual heightfield terrain.
 
-    Observation (53-dim):
-        Base observations from Go2Env: 45
-        + Terrain height at 4 foot positions (relative to base): 4
-        + Forward terrain scan (4 points ahead): 4
-        Total: 53
-
-    The terrain is generated procedurally at environment creation.
-    Difficulty controls terrain feature height (0=flat, 1=hard).
+    Observation: same 45-dim as Go2Env (flat model compatible).
+    Physics: flat plane floor (heightfield is visual only).
+    Rewards: terrain-relative base height target.
     """
 
     def __init__(
         self,
         difficulty: float = 0.5,
         terrain_seed: int | None = None,
+        curriculum: bool = False,
+        curriculum_start: float = 0.0,
+        curriculum_end: float | None = None,
+        curriculum_steps: int = 1_000_000,
         **kwargs,
     ):
         # Ensure terrain scene XML exists
         scene_xml = ensure_terrain_scene_xml()
 
+        # Curriculum: gradually increase difficulty during training
+        self._curriculum = curriculum
+        self._curriculum_start = curriculum_start
+        self._curriculum_end = curriculum_end or difficulty
+        self._curriculum_steps = curriculum_steps
+        self._curriculum_step_count = 0
+
         # Generate terrain heightfield
         self.terrain_gen = TerrainGenerator()
-        self.terrain_heights = self.terrain_gen.generate(
-            difficulty=difficulty, seed=terrain_seed
-        )
-        self.terrain_difficulty = difficulty
+        self._terrain_seed = terrain_seed
+        if curriculum:
+            # Start with curriculum_start difficulty
+            self.terrain_heights = self.terrain_gen.generate(
+                difficulty=curriculum_start, seed=terrain_seed
+            )
+            self.terrain_difficulty = curriculum_start
+        else:
+            self.terrain_heights = self.terrain_gen.generate(
+                difficulty=difficulty, seed=terrain_seed
+            )
+            self.terrain_difficulty = difficulty
 
         # Initialize parent with terrain scene XML
         kwargs.pop("scene_xml_path", None)
         super().__init__(scene_xml_path=scene_xml, **kwargs)
 
-        # Inject heightfield data into the loaded model
+        # Store hfield address for later updates
         hfield_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_HFIELD, "terrain"
         )
-        adr = self.model.hfield_adr[hfield_id]
-        n = self.terrain_gen.nrow * self.terrain_gen.ncol
-        self.model.hfield_data[adr : adr + n] = self.terrain_heights.flatten()
+        self._hfield_adr = self.model.hfield_adr[hfield_id]
+        self._hfield_n = self.terrain_gen.nrow * self.terrain_gen.ncol
 
-        # Extend observation space for terrain info
-        self._terrain_obs_dim = 8  # 4 foot heights + 4 forward scan
-        obs_dim = 45 + self._terrain_obs_dim
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+        # Inject heightfield data into the loaded model
+        self.model.hfield_data[self._hfield_adr : self._hfield_adr + self._hfield_n] = (
+            self.terrain_heights.flatten()
         )
+
+        # Keep same 45-dim obs space as flat env.
+        # Terrain obs removed: with plane floor physics, heightfield data
+        # doesn't affect contacts, making terrain obs misleading.
 
     def _get_terrain_height_at(self, x, y):
         """Get terrain height at world coordinates."""
@@ -103,9 +120,7 @@ class Go2TerrainEnv(Go2Env):
         return np.concatenate([foot_terrain, scan_heights])
 
     def _compute_observation(self) -> np.ndarray:
-        base_obs = super()._compute_observation()  # 45 dims
-        terrain_obs = self._compute_terrain_obs()   # 8 dims
-        return np.concatenate([base_obs, terrain_obs]).astype(np.float32)
+        return super()._compute_observation()  # 45 dims (same as flat env)
 
     def _compute_reward(self) -> tuple[float, dict]:
         """Compute reward with terrain-relative base height."""
@@ -205,6 +220,23 @@ class Go2TerrainEnv(Go2Env):
         return terminated, truncated
 
     def reset(self, seed=None, options=None):
+        # Update curriculum difficulty if enabled
+        if self._curriculum:
+            self._curriculum_step_count += self._step_count  # accumulate actual steps
+            progress = min(self._curriculum_step_count / self._curriculum_steps, 1.0)
+            new_diff = (
+                self._curriculum_start
+                + (self._curriculum_end - self._curriculum_start) * progress
+            )
+            if abs(new_diff - self.terrain_difficulty) > 0.01:
+                self.terrain_difficulty = new_diff
+                self.terrain_heights = self.terrain_gen.generate(
+                    difficulty=new_diff, seed=self._terrain_seed
+                )
+                self.model.hfield_data[
+                    self._hfield_adr : self._hfield_adr + self._hfield_n
+                ] = self.terrain_heights.flatten()
+
         obs, info = super().reset(seed=seed, options=options)
 
         # Adjust base height for terrain at spawn position

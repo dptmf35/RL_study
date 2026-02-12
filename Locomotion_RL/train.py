@@ -18,11 +18,33 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import (
+    BaseCallback,
     EvalCallback,
     CheckpointCallback,
     CallbackList,
 )
 from stable_baselines3.common.logger import configure
+
+
+class SaveVecNormalizeCallback(BaseCallback):
+    """Save VecNormalize stats when EvalCallback saves a new best model."""
+
+    def __init__(self, save_path, eval_callback, verbose=0):
+        super().__init__(verbose)
+        self.save_path = save_path
+        self.eval_callback = eval_callback
+        self._last_best_mean_reward = -np.inf
+
+    def _on_step(self) -> bool:
+        # Only save when EvalCallback found a new best model
+        current_best = self.eval_callback.best_mean_reward
+        if current_best > self._last_best_mean_reward:
+            self._last_best_mean_reward = current_best
+            vecnorm_path = os.path.join(self.save_path, "best_model_vecnormalize.pkl")
+            self.training_env.save(vecnorm_path)
+            if self.verbose > 0:
+                print(f"Saved VecNormalize (best reward: {current_best:.2f})")
+        return True
 
 sys.path.insert(0, os.path.dirname(__file__))
 from envs.go2_env import Go2Env
@@ -30,7 +52,8 @@ from envs.go2_terrain_env import Go2TerrainEnv
 from configs.go2_config import TRAIN_CONFIG
 
 
-def make_env(env_config, seed=0, use_terrain=False, terrain_config=None):
+def make_env(env_config, seed=0, use_terrain=False, terrain_config=None,
+             curriculum=False, curriculum_steps=1_000_000):
     """Create a Go2 environment factory."""
     def _init():
         if use_terrain:
@@ -38,6 +61,9 @@ def make_env(env_config, seed=0, use_terrain=False, terrain_config=None):
             env = Go2TerrainEnv(
                 difficulty=t_cfg.get("difficulty", 0.5),
                 terrain_seed=seed,  # each env gets unique terrain
+                curriculum=curriculum,
+                curriculum_start=0.0,
+                curriculum_steps=curriculum_steps,
                 **env_config,
             )
         else:
@@ -70,6 +96,8 @@ def train(args):
     print(f"Mode            : {mode}")
     if use_terrain:
         print(f"Terrain difficulty: {terrain_config.get('difficulty', 0.5)}")
+        if args.curriculum:
+            print(f"Curriculum      : 0.0 → {terrain_config.get('difficulty', 0.5)} over {total_timesteps // 2:,} steps")
     print(f"Total timesteps : {total_timesteps:,}")
     print(f"Parallel envs   : {n_envs}")
     print(f"Log dir         : {log_dir}")
@@ -78,9 +106,12 @@ def train(args):
 
     # Create vectorized training environments
     env_config = config["env"]
+    curriculum_steps = total_timesteps // 2  # reach target difficulty at midpoint
     train_envs = SubprocVecEnv(
         [make_env(env_config, seed=i, use_terrain=use_terrain,
-                  terrain_config=terrain_config) for i in range(n_envs)]
+                  terrain_config=terrain_config,
+                  curriculum=args.curriculum if use_terrain else False,
+                  curriculum_steps=curriculum_steps) for i in range(n_envs)]
     )
     train_envs = VecNormalize(
         train_envs,
@@ -119,7 +150,9 @@ def train(args):
         name_prefix="go2_ppo",
     )
 
-    callbacks = CallbackList([eval_callback, checkpoint_callback])
+    vecnorm_callback = SaveVecNormalizeCallback(save_path=model_dir, eval_callback=eval_callback)
+
+    callbacks = CallbackList([eval_callback, checkpoint_callback, vecnorm_callback])
 
     # PPO model
     ppo_config = config["ppo"]
@@ -184,5 +217,6 @@ if __name__ == "__main__":
     parser.add_argument("--resume", type=str, default=None, help="Path to model to resume training from")
     parser.add_argument("--terrain", action="store_true", help="Train on terrain (heightfield)")
     parser.add_argument("--difficulty", type=float, default=None, help="Terrain difficulty 0.0-1.0")
+    parser.add_argument("--curriculum", action="store_true", help="Use difficulty curriculum (0→target)")
     args = parser.parse_args()
     train(args)

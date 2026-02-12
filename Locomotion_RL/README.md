@@ -50,11 +50,10 @@ Locomotion_RL/
 | 이전 행동 | 12 | 행동 smoothness 유도 |
 | 몸체 각속도 (x0.25) | 3 | 스케일링된 회전 속도 |
 
-#### 지형 환경 (53차원) - 평지 관측 + 추가 8차원
-| 추가 관측값 | 차원 | 설명 |
-|-------------|------|------|
-| 발 아래 지형 높이 | 4 | 각 발 위치의 지형 높이 (body 상대) |
-| 전방 지형 스캔 | 4 | 0.15~0.60m 전방 지형 높이 |
+#### 지형 환경 (45차원) - 평지 환경과 동일
+지형 환경은 평지 환경과 동일한 45차원 관측 공간을 사용합니다. 이는 평지에서 학습된 정책을 지형 환경에서 재사용할 수 있게 합니다. 지형 정보는 보상 계산(높이 목표)과 시각화에만 사용됩니다.
+
+> **참고**: MuJoCo heightfield는 Go2의 작은 발 구체(r=0.022m)와의 접촉에서 비정상적 법선 벡터를 생성하는 문제가 있어, 물리 시뮬레이션에는 평면 바닥을 사용하고 heightfield는 시각적 표시용으로만 활용합니다.
 
 ### 행동 공간 (12차원)
 - 기본 서있는 자세 대비 관절 위치 오프셋 [-1, 1]
@@ -86,10 +85,11 @@ Locomotion_RL/
 | stairs | 계단 (단차 높이는 난이도에 비례) |
 | rough | 불규칙한 거친 지면 |
 
-- **지형 크기**: 20m x 20m (200x200 heightfield, 0.1m 해상도)
+- **지형 크기**: 20m x 20m (50x50 heightfield, 0.4m 해상도)
 - **난이도**: 0.0 (평지) ~ 1.0 (험한 지형)
 - **배치**: 로봇 시작점(x≈0) 주변은 평탄, x > 1m 부터 지형 시작
-- **패치 기반**: 2.5m 단위 패치로 다양한 지형 타입 혼합
+- **패치 기반**: ~2m 단위 패치로 다양한 지형 타입 혼합
+- **물리**: 평면 바닥(정확한 접촉), heightfield는 시각 전용
 
 ### 종료 조건
 - 몸체 기울기 > 0.8 rad (넘어짐)
@@ -129,16 +129,21 @@ python train.py --resume checkpoints/<run_name>/best_model.zip
 ### 2. 지형 보행 학습
 
 ```bash
-# 기본 지형 학습 (난이도 0.5)
-python train.py --terrain
+# 추천: 평지 모델에서 전이 학습 (빠른 수렴)
+python train.py --terrain --difficulty 0.5 --timesteps 2000000 \
+    --resume checkpoints/<flat_run>/final_model.zip
 
-# 난이도 조절 (0.0=평지, 1.0=험한 지형)
-python train.py --terrain --difficulty 0.3     # 쉬운 지형
-python train.py --terrain --difficulty 0.8     # 어려운 지형
+# 처음부터 학습 (수렴이 느릴 수 있음)
+python train.py --terrain --difficulty 0.5
+
+# 커리큘럼 학습 (난이도 0.0 → 0.5 점진 증가)
+python train.py --terrain --difficulty 0.5 --curriculum
 
 # 빠른 테스트
 python train.py --terrain --timesteps 50000 --n_envs 2
 ```
+
+> **팁**: 지형 학습은 평지 모델을 초기화로 사용하면 훨씬 빠르게 수렴합니다. 처음부터 학습하면 PPO가 "서 있기만 하는" 로컬 최적해에 빠질 수 있습니다.
 
 학습 중 TensorBoard로 모니터링:
 ```bash
@@ -215,15 +220,16 @@ python navigate.py --model checkpoints/<run_name>/best_model.zip --terrain --dif
 
 | 파라미터 | 값 | 설명 |
 |----------|-----|------|
-| learning_rate | 3e-4 | Adam 학습률 |
-| n_steps | 2048 | 업데이트당 수집 스텝 |
-| batch_size | 64 | 미니배치 크기 |
-| n_epochs | 10 | 에폭 수 |
+| learning_rate | 1e-4 | Adam 학습률 (안정적 업데이트) |
+| n_steps | 4096 | 업데이트당 수집 스텝 |
+| batch_size | 128 | 미니배치 크기 |
+| n_epochs | 5 | 에폭 수 (과적합 방지) |
 | gamma | 0.99 | 할인 인자 |
 | gae_lambda | 0.95 | GAE lambda |
 | clip_range | 0.2 | PPO 클리핑 범위 |
-| ent_coef | 0.01 | 엔트로피 보너스 |
+| ent_coef | 0.005 | 엔트로피 보너스 (std 폭발 방지) |
 | net_arch | [256, 256, 128] | MLP 은닉층 |
+| log_std_init | -1.0 | 초기 행동 표준편차 (~0.37) |
 
 ## 설계 원칙
 

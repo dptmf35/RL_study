@@ -13,8 +13,12 @@ _MENAGERIE_GO2_DIR = os.path.join(
 )
 
 # Terrain heightfield parameters (must match scene_terrain.xml)
-TERRAIN_NROW = 200
-TERRAIN_NCOL = 200
+# NOTE: Low resolution (50x50) is critical for clean contact normals.
+# With 200x200 (0.1m triangles), Go2 foot spheres (r=0.022m) generate
+# multiple contacts per foot with bad normals, preventing locomotion.
+# At 50x50 (0.4m triangles), each foot sits cleanly within one triangle.
+TERRAIN_NROW = 50
+TERRAIN_NCOL = 50
 TERRAIN_X_HALF = 10.0   # half-extent in x → total 20m
 TERRAIN_Y_HALF = 10.0   # half-extent in y → total 20m
 TERRAIN_Z_MAX = 0.8      # max terrain height
@@ -39,14 +43,18 @@ _SCENE_TERRAIN_XML = f"""\
     <texture type="2d" name="groundplane" builtin="checker" mark="edge"
       rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300"/>
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    <material name="terrain_mat" rgba="0.5 0.55 0.45 0.8"/>
     <hfield name="terrain" nrow="{TERRAIN_NROW}" ncol="{TERRAIN_NCOL}"
       size="{TERRAIN_X_HALF} {TERRAIN_Y_HALF} {TERRAIN_Z_MAX} {TERRAIN_Z_MIN}"/>
   </asset>
 
   <worldbody>
     <light pos="0 0 3" dir="0 0 -1" directional="true"/>
-    <geom name="floor" type="hfield" hfield="terrain" material="groundplane"
-      condim="6" friction="0.6 0.005 0.0001"/>
+    <!-- Plane for reliable foot contacts (physics floor) -->
+    <geom name="floor" type="plane" size="0 0 0.05" material="groundplane"/>
+    <!-- Heightfield for visual terrain display only (no collision) -->
+    <geom name="terrain_visual" type="hfield" hfield="terrain" material="terrain_mat"
+      contype="0" conaffinity="0"/>
   </worldbody>
 </mujoco>
 """
@@ -123,7 +131,7 @@ class TerrainGenerator:
         flat_end_col = self._x_to_col(1.0)
 
         # Generate terrain patches in the rest
-        patch_size = 20  # ~2m patches
+        patch_size = 5  # ~2m patches (at 50x50 res, 5 cells ≈ 2m)
         for r0 in range(0, self.nrow, patch_size):
             for c0 in range(flat_end_col, self.ncol, patch_size):
                 r1 = min(r0 + patch_size, self.nrow)
@@ -155,7 +163,7 @@ class TerrainGenerator:
 
         elif ttype == "stairs":
             step_h = max_h * 0.3
-            step_w = max(3, int(8 * (1 - max_h * 2)))
+            step_w = max(1, int(2 * (1 - max_h * 2)))
             stair = np.zeros((rows, cols), dtype=np.float32)
             for j in range(cols):
                 stair[:, j] = step_h * (j // step_w)

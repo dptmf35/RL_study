@@ -222,6 +222,9 @@ def main():
 
     obs, info = env.reset()
 
+    # Extend episode length for navigation (no truncation during active navigation)
+    env.max_episode_steps = 50000  # ~1000 seconds
+
     # Navigation planner
     planner = NavigationPlanner()
     stop_event = threading.Event()

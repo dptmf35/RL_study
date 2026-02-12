@@ -70,6 +70,7 @@ def evaluate_headless(model_path, n_episodes=10, use_terrain=False, difficulty=0
         total_reward = 0.0
         steps = 0
         start_pos = None
+        last_pos = None
 
         while not done:
             action, _ = model.predict(obs, deterministic=True)
@@ -77,10 +78,13 @@ def evaluate_headless(model_path, n_episodes=10, use_terrain=False, difficulty=0
             total_reward += reward[0]
             steps += 1
 
-            if start_pos is None and "base_pos" in info[0]:
-                start_pos = info[0]["base_pos"].copy()
+            if "base_pos" in info[0]:
+                if start_pos is None:
+                    start_pos = info[0]["base_pos"].copy()
+                last_pos = info[0]["base_pos"].copy()
 
-        final_pos = info[0].get("base_pos", np.zeros(3))
+        # Use last_pos before auto-reset (VecEnv overwrites info on done)
+        final_pos = last_pos if last_pos is not None else np.zeros(3)
         fwd_dist = final_pos[0] - (start_pos[0] if start_pos is not None else 0)
 
         episode_rewards.append(total_reward)

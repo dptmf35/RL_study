@@ -37,18 +37,19 @@ TRAIN_CONFIG = {
 
     # PPO hyperparameters
     "ppo": {
-        "learning_rate": 3e-4,
-        "n_steps": 2048,
-        "batch_size": 64,
-        "n_epochs": 10,
+        "learning_rate": 1e-4,          # 3e-4 → 1e-4 (more stable updates)
+        "n_steps": 4096,                # 2048 → 4096 (better gradient estimates)
+        "batch_size": 128,              # 64 → 128 (smoother updates)
+        "n_epochs": 5,                  # 10 → 5 (prevent over-fitting per batch)
         "gamma": 0.99,
         "gae_lambda": 0.95,
         "clip_range": 0.2,
-        "ent_coef": 0.01,
+        "ent_coef": 0.005,             # 0.01 → 0.005 (prevent std explosion)
         "vf_coef": 0.5,
         "max_grad_norm": 0.5,
         "policy_kwargs": {
             "net_arch": [256, 256, 128],
+            "log_std_init": -1.0,       # lower initial std (~0.37 vs default 1.0)
         },
     },
 
