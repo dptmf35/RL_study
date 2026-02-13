@@ -1,28 +1,30 @@
 """
-Go2 Locomotion Environment with Terrain Support.
+Go2 Locomotion Environment with Box-Based Terrain.
 
 Extends Go2Env with:
-- Procedural heightfield terrain (visual display)
+- Box primitive terrain (real physics collision, not visual-only heightfield)
 - Terrain-relative rewards and termination
-- Same 45-dim observation space as flat env (compatible with flat model)
-
-Note: Physics uses a flat plane floor. The heightfield is visual only due to
-MuJoCo heightfield contact normal issues with small sphere colliders.
+- Curriculum learning via runtime terrain height scaling
+- Same 45-dim observation space as flat env (transfer learning compatible)
 """
 
 import numpy as np
 import mujoco
 
 from envs.go2_env import Go2Env, NUM_JOINTS
-from envs.terrain import TerrainGenerator, ensure_terrain_scene_xml
+from envs.terrain import TerrainGenerator
 
 
 class Go2TerrainEnv(Go2Env):
-    """Go2 environment with visual heightfield terrain.
+    """Go2 environment with box-based terrain.
 
-    Observation: same 45-dim as Go2Env (flat model compatible).
-    Physics: flat plane floor (heightfield is visual only).
+    Terrain is built from stacked box primitives (stepped-pyramid mounds)
+    which provide reliable physics collision with Go2's small foot spheres.
+
+    Observation: same 45-dim as Go2Env (transfer learning compatible).
+    Physics: ground plane + box terrain geoms (real collision).
     Rewards: terrain-relative base height target.
+    Curriculum: scales terrain geom heights from flat to full difficulty.
     """
 
     def __init__(
@@ -35,89 +37,79 @@ class Go2TerrainEnv(Go2Env):
         curriculum_steps: int = 1_000_000,
         **kwargs,
     ):
-        # Ensure terrain scene XML exists
-        scene_xml = ensure_terrain_scene_xml()
+        # Target difficulty (terrain generated at this level)
+        self._target_difficulty = curriculum_end or difficulty
 
-        # Curriculum: gradually increase difficulty during training
-        self._curriculum = curriculum
-        self._curriculum_start = curriculum_start
-        self._curriculum_end = curriculum_end or difficulty
-        self._curriculum_steps = curriculum_steps
-        self._curriculum_step_count = 0
-
-        # Generate terrain heightfield
+        # Generate terrain and scene XML
         self.terrain_gen = TerrainGenerator()
         self._terrain_seed = terrain_seed
-        if curriculum:
-            # Start with curriculum_start difficulty
-            self.terrain_heights = self.terrain_gen.generate(
-                difficulty=curriculum_start, seed=terrain_seed
-            )
-            self.terrain_difficulty = curriculum_start
-        else:
-            self.terrain_heights = self.terrain_gen.generate(
-                difficulty=difficulty, seed=terrain_seed
-            )
-            self.terrain_difficulty = difficulty
+        self.terrain_gen.generate(
+            difficulty=self._target_difficulty, seed=terrain_seed
+        )
+        scene_xml = self.terrain_gen.generate_scene_xml()
+
+        # Curriculum setup
+        self._curriculum = curriculum
+        self._curriculum_start = curriculum_start
+        self._curriculum_end = self._target_difficulty
+        self._curriculum_steps = curriculum_steps
+        self._curriculum_step_count = 0
+        self._difficulty_scale = curriculum_start if curriculum else 1.0
 
         # Initialize parent with terrain scene XML
         kwargs.pop("scene_xml_path", None)
         super().__init__(scene_xml_path=scene_xml, **kwargs)
 
-        # Store hfield address for later updates
-        hfield_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_HFIELD, "terrain"
-        )
-        self._hfield_adr = self.model.hfield_adr[hfield_id]
-        self._hfield_n = self.terrain_gen.nrow * self.terrain_gen.ncol
+        # Find terrain geom IDs for curriculum scaling
+        self._terrain_geom_ids = []
+        for i in range(self.model.ngeom):
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, i)
+            if name and name.startswith("terrain_"):
+                self._terrain_geom_ids.append(i)
+        self._terrain_geom_ids = np.array(self._terrain_geom_ids, dtype=np.int32)
 
-        # Inject heightfield data into the loaded model
-        self.model.hfield_data[self._hfield_adr : self._hfield_adr + self._hfield_n] = (
-            self.terrain_heights.flatten()
+        # Store reference z-positions and z-sizes for curriculum scaling
+        self._terrain_ref_pos_z, self._terrain_ref_size_z = (
+            self.terrain_gen.get_terrain_geom_ref_data()
         )
 
-        # Keep same 45-dim obs space as flat env.
-        # Terrain obs removed: with plane floor physics, heightfield data
-        # doesn't affect contacts, making terrain obs misleading.
+        # Apply initial difficulty scale
+        self._apply_difficulty_scale(self._difficulty_scale)
+
+    def _apply_difficulty_scale(self, scale):
+        """Scale terrain box heights by difficulty factor.
+
+        At scale=0: all terrain boxes are flat (embedded in ground plane).
+        At scale=1: full terrain height.
+        """
+        self._difficulty_scale = scale
+        min_size = 0.0005  # minimum half-height to avoid degenerate boxes
+        for i, gid in enumerate(self._terrain_geom_ids):
+            self.model.geom_pos[gid, 2] = self._terrain_ref_pos_z[i] * scale
+            self.model.geom_size[gid, 2] = max(
+                self._terrain_ref_size_z[i] * scale, min_size
+            )
 
     def _get_terrain_height_at(self, x, y):
-        """Get terrain height at world coordinates."""
-        return self.terrain_gen.sample_height(self.terrain_heights, x, y)
+        """Get terrain height at world coordinates (scaled by difficulty)."""
+        return self.terrain_gen.sample_height(x, y, self._difficulty_scale)
 
-    def _compute_terrain_obs(self) -> np.ndarray:
-        """Compute terrain-specific observations.
+    def _get_feet_contact(self) -> np.ndarray:
+        """Check which feet are in contact with ground or terrain.
 
-        Returns:
-            8-dim array:
-                [0:4] terrain height at each foot relative to base z (scaled)
-                [4:8] forward scan heights relative to base z (scaled)
+        Unlike flat env (checks floor geom only), this checks contacts
+        against any worldbody geom (body_id=0), including terrain boxes.
         """
-        base_pos = self._get_base_pos()
-        base_z = base_pos[2]
-
-        # Get body-frame forward direction (projected to xy)
-        quat = self._get_base_quat()
-        rot = np.zeros(9)
-        mujoco.mju_quat2Mat(rot, quat)
-        rot = rot.reshape(3, 3)
-        forward_xy = rot[:2, 0]  # first column of rotation matrix (x-axis in body)
-
-        # Terrain height at each foot position
-        foot_terrain = np.zeros(4)
-        for i, geom_id in enumerate(self._foot_geom_ids):
-            foot_pos = self.data.geom_xpos[geom_id]
-            terrain_z = self._get_terrain_height_at(foot_pos[0], foot_pos[1])
-            foot_terrain[i] = (terrain_z - base_z) * 5.0  # scaled
-
-        # Forward terrain scan: 4 points at 0.15, 0.30, 0.45, 0.60m ahead
-        scan_heights = np.zeros(4)
-        for i, dist in enumerate([0.15, 0.30, 0.45, 0.60]):
-            scan_x = base_pos[0] + forward_xy[0] * dist
-            scan_y = base_pos[1] + forward_xy[1] * dist
-            terrain_z = self._get_terrain_height_at(scan_x, scan_y)
-            scan_heights[i] = (terrain_z - base_z) * 5.0  # scaled
-
-        return np.concatenate([foot_terrain, scan_heights])
+        contacts = np.zeros(4, dtype=bool)
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            for foot_idx, geom_id in enumerate(self._foot_geom_ids):
+                if c.geom1 == geom_id or c.geom2 == geom_id:
+                    other = c.geom2 if c.geom1 == geom_id else c.geom1
+                    # Contact with any worldbody geom (floor + terrain boxes)
+                    if self.model.geom_bodyid[other] == 0:
+                        contacts[foot_idx] = True
+        return contacts
 
     def _compute_observation(self) -> np.ndarray:
         return super()._compute_observation()  # 45 dims (same as flat env)
@@ -220,22 +212,16 @@ class Go2TerrainEnv(Go2Env):
         return terminated, truncated
 
     def reset(self, seed=None, options=None):
-        # Update curriculum difficulty if enabled
+        # Update curriculum difficulty
         if self._curriculum:
-            self._curriculum_step_count += self._step_count  # accumulate actual steps
+            self._curriculum_step_count += self._step_count
             progress = min(self._curriculum_step_count / self._curriculum_steps, 1.0)
-            new_diff = (
+            new_scale = (
                 self._curriculum_start
                 + (self._curriculum_end - self._curriculum_start) * progress
             )
-            if abs(new_diff - self.terrain_difficulty) > 0.01:
-                self.terrain_difficulty = new_diff
-                self.terrain_heights = self.terrain_gen.generate(
-                    difficulty=new_diff, seed=self._terrain_seed
-                )
-                self.model.hfield_data[
-                    self._hfield_adr : self._hfield_adr + self._hfield_n
-                ] = self.terrain_heights.flatten()
+            if abs(new_scale - self._difficulty_scale) > 0.01:
+                self._apply_difficulty_scale(new_scale)
 
         obs, info = super().reset(seed=seed, options=options)
 
@@ -248,6 +234,6 @@ class Go2TerrainEnv(Go2Env):
 
         # Recompute observation with correct height
         obs = self._compute_observation()
-        info["terrain_difficulty"] = self.terrain_difficulty
+        info["terrain_difficulty"] = self._difficulty_scale
 
         return obs, info

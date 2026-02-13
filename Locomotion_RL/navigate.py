@@ -23,7 +23,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 sys.path.insert(0, os.path.dirname(__file__))
-from envs.go2_env import Go2Env
+from envs.go2_env import Go2Env, NUM_JOINTS
 from envs.go2_terrain_env import Go2TerrainEnv
 
 
@@ -254,18 +254,23 @@ def main():
             target_terrain_z = 0.0
             with planner._lock:
                 target = planner.target.copy() if planner.target is not None else None
+                arrived = planner.arrived
             if target is not None and args.terrain:
                 target_terrain_z = env._get_terrain_height_at(target[0], target[1])
 
             # Draw markers
             add_markers(viewer, target, robot_pos, target_terrain_z)
 
-            # Policy inference
-            obs_norm = normalize_obs(obs, vec_env)
-            action, _ = model_ppo.predict(
-                obs_norm.reshape(1, -1), deterministic=True
-            )
-            action = action.flatten()
+            # When arrived or no target: bypass policy, hold default stance
+            if arrived or target is None:
+                action = np.zeros(NUM_JOINTS, dtype=np.float32)
+            else:
+                # Policy inference
+                obs_norm = normalize_obs(obs, vec_env)
+                action, _ = model_ppo.predict(
+                    obs_norm.reshape(1, -1), deterministic=True
+                )
+                action = action.flatten()
 
             # Step environment
             obs, reward, terminated, truncated, info = env.step(action)

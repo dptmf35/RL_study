@@ -35,6 +35,13 @@ TRAIN_CONFIG = {
         "terrain_seed": None,
     },
 
+    # Reward overrides for terrain training (stronger forward incentive)
+    "terrain_reward_overrides": {
+        "rew_forward_vel": 2.0,     # 1.0 → 2.0 (incentivize walking over standing)
+        "rew_feet_air_time": 2.0,   # 1.0 → 2.0 (encourage gait cycles)
+        "rew_alive": 0.1,           # 0.5 → 0.1 (less reward for standing still)
+    },
+
     # PPO hyperparameters
     "ppo": {
         "learning_rate": 1e-4,          # 3e-4 → 1e-4 (more stable updates)

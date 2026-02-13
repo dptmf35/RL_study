@@ -105,7 +105,11 @@ def train(args):
     print()
 
     # Create vectorized training environments
-    env_config = config["env"]
+    env_config = config["env"].copy()
+    # Apply terrain reward overrides to incentivize walking over standing
+    if use_terrain and "terrain_reward_overrides" in config:
+        env_config.update(config["terrain_reward_overrides"])
+        print(f"Terrain reward overrides: {config['terrain_reward_overrides']}")
     curriculum_steps = total_timesteps // 2  # reach target difficulty at midpoint
     train_envs = SubprocVecEnv(
         [make_env(env_config, seed=i, use_terrain=use_terrain,
@@ -158,10 +162,46 @@ def train(args):
     ppo_config = config["ppo"]
     if args.resume:
         print(f"Resuming from: {args.resume}")
-        model = PPO.load(args.resume, env=train_envs)
+        # Load policy weights but use our hyperparameters (PPO.load preserves
+        # the original model's hyperparams which may not suit fine-tuning)
+        old_model = PPO.load(args.resume, device="auto")
+        model = PPO(
+            "MlpPolicy",
+            train_envs,
+            learning_rate=ppo_config["learning_rate"],
+            n_steps=ppo_config["n_steps"],
+            batch_size=ppo_config["batch_size"],
+            n_epochs=ppo_config["n_epochs"],
+            gamma=ppo_config["gamma"],
+            gae_lambda=ppo_config["gae_lambda"],
+            clip_range=ppo_config["clip_range"],
+            ent_coef=ppo_config["ent_coef"],
+            vf_coef=ppo_config["vf_coef"],
+            max_grad_norm=ppo_config["max_grad_norm"],
+            policy_kwargs=ppo_config["policy_kwargs"],
+            verbose=1,
+            tensorboard_log=log_dir,
+            device="auto",
+        )
+        # Transfer learned policy weights
+        model.policy.load_state_dict(old_model.policy.state_dict())
+        del old_model
+
+        # Reset log_std if it diverged (common with high ent_coef)
+        import torch
+        current_std = torch.exp(model.policy.log_std).mean().item()
+        target_std = 0.5  # reasonable for locomotion fine-tuning
+        if current_std > 1.5:
+            new_log_std = float(np.log(target_std))
+            model.policy.log_std.data.fill_(new_log_std)
+            print(f"Reset log_std: {current_std:.2f} → {target_std:.2f} (was too high)")
+
+        print(f"Loaded policy weights, using config hyperparameters (lr={ppo_config['learning_rate']})")
+
         vecnorm_path = args.resume.replace(".zip", "_vecnormalize.pkl")
         if os.path.exists(vecnorm_path):
-            train_envs = VecNormalize.load(vecnorm_path, train_envs)
+            train_envs = VecNormalize.load(vecnorm_path, train_envs.venv)
+            model.set_env(train_envs)
             print(f"Loaded VecNormalize from: {vecnorm_path}")
     else:
         model = PPO(
