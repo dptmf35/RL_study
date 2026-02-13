@@ -35,8 +35,8 @@ class AlignmentConfig:
     approach_height_target: float = 0.10  # target offset between ee and cube
     approach_height_band: float = 0.02
     gripper_open_threshold: float = 0.2
-    orientation_weight: float = 3.0  # Penalty weight for non-vertical gripper
-    orientation_threshold: float = 0.9  # Min downward alignment for success (~25° from vertical)
+    orientation_weight: float = 5.0  # Penalty weight for non-vertical gripper
+    orientation_threshold: float = 0.98  # Min downward alignment for success (~11° from vertical)
     max_episode_steps: int = 300
     joint_delta_scale: float = 0.2  # Increased from 0.05 for faster movement
     frame_skip: int = 5
@@ -204,10 +204,18 @@ class DSRH2017AlignEnv(gym.Env):
         gripper_z = self.data.site_xmat[self.ee_site_id].reshape(3, 3)[:, 2]
         downward_alignment = np.dot(gripper_z, np.array([0.0, 0.0, -1.0]))
 
+        # Coupled bonus: rewards simultaneous position + orientation quality
+        # pos_quality: 1.0 at target, 0.0 at 10cm+
+        # orient_quality: 1.0 at perfect vertical, 0.0 at alignment <= 0.9
+        pos_quality = max(0.0, 1.0 - distance_xy / 0.10)
+        height_quality = max(0.0, 1.0 - abs(height_error) / 0.05)
+        orient_quality = max(0.0, (downward_alignment - 0.90) / 0.10)
+
         reward_components: Dict[str, float] = {
             "distance": -5.0 * distance_xy,
             "height": -5.0 * abs(height_error),
             "orientation": -self.cfg.orientation_weight * (1.0 - downward_alignment),
+            "coupled": 3.0 * pos_quality * height_quality * orient_quality,
             "success": 0.0,
             "time": -0.01,
         }

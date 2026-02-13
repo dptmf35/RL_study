@@ -72,20 +72,41 @@ Asset directories originate from `/home/yeseul/Desktop/doosan_ws/src/doosan-robo
 
 ## Environment Highlights
 
-- **Observation (28 dims)**: joint positions (6), joint velocities (6), gripper driver state (1), end-effector position (3), cube position (3), cube velocity (3), relative displacement (3), normalized XY direction to cube (2), XY distance (1).
+- **Observation (31 dims)**: joint positions (6), joint velocities (6), gripper driver state (1), end-effector position (3), cube position (3), cube velocity (3), relative displacement (3), normalized XY direction to cube (2), XY distance (1), **gripper z-axis (3)** — 그리퍼 접근 방향 벡터.
 - **Action (7 dims)**: joint angle deltas (6, scaled by 0.2) + gripper command (1, open/close). The agent controls position actuators directly.
 - **Reward shaping** (개선된 Dense Reward):
   - **Distance penalty**: `-5.0 × distance_xy` — 수평 거리 패널티
   - **Height penalty**: `-5.0 × |height_error|` — 높이 오차 패널티 (target: 큐브 위 10cm)
+  - **Orientation penalty**: `-5.0 × (1 - downward_alignment)` — 그리퍼 수직 정렬 패널티
+  - **Coupled bonus**: `3.0 × pos_quality × height_quality × orient_quality` — 위치와 자세를 **동시에** 맞출 때만 보상 (곱셈 구조로 순차적 최적화 방지)
   - **Success reward**: +100.0 (최초 성공 시) / +10.0 (성공 유지 시)
   - **Time penalty**: -0.01/step — 빠른 완료 유도
-  - ~~Coarse/Tight align bonuses~~ → **제거됨** (reward hacking 방지)
-  - **Success 조건**: XY < 4cm, 높이 오차 ±2cm 이내, 그리퍼 open
+  - **Success 조건**: XY < 4cm, 높이 오차 ±2cm 이내, **orientation ≥ 0.98**, 그리퍼 open
 - **Home position 랜덤화** (`--randomize-home`):
   - 매 에피소드마다 home joint 값에 uniform noise ±0.15 rad (~8.6°) 추가
   - Joint limits 내로 클리핑하여 안전 보장
   - `--home-noise-scale`로 난이도 조절 (0.1=쉬움, 0.3=어려움)
 - **Termination**: success flag triggers episode termination; otherwise episodes truncate at 300 steps.
+
+### Orientation (수직 정렬) 학습
+
+그리퍼가 바닥을 수직으로 바라보도록 자세 정렬을 학습합니다. 파지(grasp) 안정성을 위해 필수적입니다.
+
+**Orientation 메트릭**: `dot(gripper_z_axis, [0, 0, -1])` — 1.0이면 완벽한 수직, 0이면 수평
+
+**설계 과정**:
+1. Observation에 gripper z-axis (3D) 추가 → 28 → 31 dims
+2. Orientation penalty 추가: `-5.0 × (1 - alignment)`
+3. Success 조건에 orientation threshold (0.98) 추가
+4. **Coupled bonus** 도입: `pos_quality × height_quality × orient_quality` (곱셈 구조)
+   - 위치만 맞추고 자세는 나중에 교정하는 순차적 최적화 방지
+   - 위치와 자세를 동시에 개선해야 보상 발생
+
+**학습 결과** (noise=0.20, 2M steps):
+- 성공률: **95% (19/20)** with `--randomize-home --home-noise-scale 0.20`
+- Orientation: **0.982 ± 0.004** (~11° from vertical)
+- Distance: 대부분 **~1mm** 수준
+- 이 로봇의 기구학적 한계(홈포즈 0.990)에 근접한 성능
 
 ### Reward Hacking 방지 설계
 
@@ -95,8 +116,9 @@ Asset directories originate from `/home/yeseul/Desktop/doosan_ws/src/doosan-robo
 1. 중간 보너스(coarse/tight) 완전 제거
 2. Height penalty를 -2.0에서 **-5.0으로 증가** (distance penalty와 동일 가중치)
 3. 순수 dense penalty로 전환 — 성공 조건 달성 시에만 보상 부여
+4. **Coupled bonus 추가** — 곱셈 구조로 위치/높이/자세 동시 최적화 유도
 
-이를 통해 에이전트는 XY 거리와 높이를 **동시에** 최소화해야만 보상을 극대화할 수 있습니다.
+이를 통해 에이전트는 XY 거리, 높이, 자세를 **동시에** 최소화해야만 보상을 극대화할 수 있습니다.
 
 ## Dependencies
 
@@ -117,12 +139,12 @@ python3 scripts/train_ppo_align.py \
   --log-dir logs \
   --model-dir models
 
-# Home position 랜덤화로 일반화 능력 향상
+# Home position 랜덤화로 일반화 능력 향상 (추천)
 python3 scripts/train_ppo_align.py \
-  --total-timesteps 500000 \
+  --total-timesteps 2000000 \
   --n-envs 4 \
   --randomize-home \
-  --home-noise-scale 0.15
+  --home-noise-scale 0.20
 ```
 
 ### PPO Hyperparameters
@@ -148,8 +170,8 @@ python3 scripts/train_ppo_align.py \
 
 **Expected Training Progress** (with optimized environment):
 - **Random policy baseline**: ~-239 reward, 0.05-0.26m initial distance
-- **Target performance**: <0.04m distance, >50% success rate
-- With proper training (200k+ timesteps), should significantly outperform random policy
+- **Target performance**: <0.04m distance, orientation ≥ 0.98, >90% success rate
+- Best result: **95% success, orient=0.982, dist~1mm** (2M steps, noise=0.20)
 
 All checkpoints are written under `models/<run_name>/` with `best/` (highest eval reward) and `final_model.zip`, plus VecNormalize statistics.
 
@@ -250,7 +272,7 @@ python3 scripts/evaluate_sac_her.py \
 python3 scripts/evaluate_sac_her.py --random --n-episodes 5
 ```
 
-> **Note**: PPO 모델은 `evaluate_align.py`, SAC+HER 모델은 `evaluate_sac_her.py`를 사용하세요. observation space가 다릅니다 (Box 28-dim vs Dict 16+3+3).
+> **Note**: PPO 모델은 `evaluate_align.py`, SAC+HER 모델은 `evaluate_sac_her.py`를 사용하세요. observation space가 다릅니다 (Box 31-dim vs Dict 16+3+3).
 
 The PPO evaluator automatically loads `vec_normalize.pkl` if found alongside the model.
 
