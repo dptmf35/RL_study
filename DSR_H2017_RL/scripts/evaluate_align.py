@@ -103,6 +103,7 @@ def evaluate(args: argparse.Namespace) -> None:
     success_count = 0
     episode_rewards: list[float] = []
     episode_lengths: list[int] = []
+    final_alignments: list[float] = []
 
     for episode in range(args.n_episodes):
         obs = env.reset()
@@ -131,9 +132,13 @@ def evaluate(args: argparse.Namespace) -> None:
         final_info = info[0]
         success = final_info.get("task_success", False)
         success_count += int(success)
+        alignment = final_info.get("downward_alignment", float("nan"))
+        final_alignments.append(alignment)
         status = "SUCCESS" if success else "FAIL"
         print(
-            f"Episode {episode + 1}: {status} | Reward={episode_reward:.2f} | Steps={step + 1} | Distance={final_info.get('distance_xy', np.nan):.3f}"
+            f"Episode {episode + 1}: {status} | Reward={episode_reward:.2f} | Steps={step + 1}"
+            f" | Dist={final_info.get('distance_xy', np.nan):.3f}"
+            f" | Orient={alignment:.3f}"
         )
 
     print("\n=== SUMMARY ===")
@@ -141,6 +146,7 @@ def evaluate(args: argparse.Namespace) -> None:
     print(f"Success rate: {success_count}/{args.n_episodes}")
     print(f"Mean reward: {np.mean(episode_rewards):.2f} +/- {np.std(episode_rewards):.2f}")
     print(f"Mean length: {np.mean(episode_lengths):.1f} +/- {np.std(episode_lengths):.1f}")
+    print(f"Mean orientation: {np.mean(final_alignments):.3f} +/- {np.std(final_alignments):.3f} (1.0 = perfect vertical)")
 
     env.close()
 

@@ -35,6 +35,8 @@ class AlignmentConfig:
     approach_height_target: float = 0.10  # target offset between ee and cube
     approach_height_band: float = 0.02
     gripper_open_threshold: float = 0.2
+    orientation_weight: float = 3.0  # Penalty weight for non-vertical gripper
+    orientation_threshold: float = 0.9  # Min downward alignment for success (~25° from vertical)
     max_episode_steps: int = 300
     joint_delta_scale: float = 0.2  # Increased from 0.05 for faster movement
     frame_skip: int = 5
@@ -96,7 +98,7 @@ class DSRH2017AlignEnv(gym.Env):
         )
         self.joint_action_scale = self.cfg.joint_delta_scale
 
-        obs_size = 6 + 6 + 1 + 3 + 3 + 3 + 3 + 2 + 1  # joints, vels, gripper, ee, cube, vel, relative, direction_xy, distance_xy
+        obs_size = 6 + 6 + 1 + 3 + 3 + 3 + 3 + 2 + 1 + 3  # joints, vels, gripper, ee, cube, vel, relative, direction_xy, distance_xy, gripper_z_axis
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
@@ -149,6 +151,9 @@ class DSRH2017AlignEnv(gym.Env):
         # Normalized direction to cube in XY plane
         direction_xy = relative_xy / (distance_xy + 1e-6)
 
+        # Gripper approach direction (z-axis of rotation matrix)
+        gripper_z_axis = self.data.site_xmat[self.ee_site_id].reshape(3, 3)[:, 2].copy()
+
         obs = np.concatenate(
             [
                 joint_pos,
@@ -160,6 +165,7 @@ class DSRH2017AlignEnv(gym.Env):
                 relative,
                 direction_xy,  # Added: normalized XY direction to cube
                 [distance_xy],  # Added: XY distance
+                gripper_z_axis,  # Gripper approach direction (3D)
             ]
         ).astype(np.float32)
         return obs
@@ -173,10 +179,15 @@ class DSRH2017AlignEnv(gym.Env):
         goal_pos = self.data.site_xpos[self.goal_site_id]
         goal_distance = np.linalg.norm(ee_pos - goal_pos)
 
+        # Gripper orientation: dot product of z-axis with downward vector
+        gripper_z = self.data.site_xmat[self.ee_site_id].reshape(3, 3)[:, 2]
+        downward_alignment = float(np.dot(gripper_z, np.array([0.0, 0.0, -1.0])))
+
         return {
             "distance_xy": float(distance_xy),
             "height_error": float(height_difference - self.cfg.approach_height_target),
             "goal_distance": float(goal_distance),
+            "downward_alignment": downward_alignment,
             "task_success": bool(self.task_success),
             "current_step": self.current_step,
         }
@@ -189,40 +200,35 @@ class DSRH2017AlignEnv(gym.Env):
         distance_xy = np.linalg.norm(ee_pos[:2] - cube_pos[:2])
         height_error = ee_pos[2] - cube_pos[2] - self.cfg.approach_height_target
 
+        # Gripper vertical alignment: dot(z_axis, [0,0,-1]) → 1.0 = perfect downward
+        gripper_z = self.data.site_xmat[self.ee_site_id].reshape(3, 3)[:, 2]
+        downward_alignment = np.dot(gripper_z, np.array([0.0, 0.0, -1.0]))
+
         reward_components: Dict[str, float] = {
-            "distance": -5.0 * distance_xy,  # XY alignment penalty
-            "height": -5.0 * abs(height_error),  # Height penalty - INCREASED to prevent reward hacking
-            "coarse_align_bonus": 0.0,
-            "tight_align_bonus": 0.0,
+            "distance": -5.0 * distance_xy,
+            "height": -5.0 * abs(height_error),
+            "orientation": -self.cfg.orientation_weight * (1.0 - downward_alignment),
             "success": 0.0,
             "time": -0.01,
         }
 
-        # Bonuses only given when BOTH XY and height are aligned
-        # This prevents agent from exploiting XY alignment while ignoring height
-        aligned_height = abs(height_error) <= self.cfg.approach_height_band  # ±2cm
-
-        # NO bonuses given - only dense rewards
-        # This ensures agent must truly align both XY and height to minimize penalties
-        # Bonuses were causing reward hacking where agent ignores height
-
+        aligned_height = abs(height_error) <= self.cfg.approach_height_band
+        aligned_orientation = downward_alignment >= self.cfg.orientation_threshold
         gripper_open = gripper_opening <= self.cfg.gripper_open_threshold
 
         if (
             distance_xy < self.cfg.xy_tolerance_strict
             and aligned_height
+            and aligned_orientation
             and gripper_open
         ):
-            # Large success reward to incentivize reaching goal
-            reward_components["success"] = 100.0  # Increased from 10.0
+            reward_components["success"] = 100.0
 
             if not self.task_success:
-                # First time achieving success
                 self.task_success = True
                 self.success_step = self.current_step
             else:
-                # Already successful - give bonus for staying aligned
-                reward_components["success"] = 10.0  # Smaller bonus for maintaining
+                reward_components["success"] = 10.0
 
         total_reward = sum(reward_components.values())
         return total_reward, reward_components
