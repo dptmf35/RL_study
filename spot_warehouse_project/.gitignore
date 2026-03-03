@@ -1,0 +1,18 @@
+# Node
+node_modules/
+dashboard/frontend/dist/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# HDF5 recordings
+data/recordings/*.h5
+
+# Planning / internal
+.sisyphus/
+
+# Editor
+.vscode/
+.idea/
