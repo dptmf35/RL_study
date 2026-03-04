@@ -1,4 +1,5 @@
 import asyncio
+import io
 import threading
 import time
 from typing import Optional
@@ -6,10 +7,11 @@ from typing import Optional
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .state_bridge import StateManager
 from .recorder import HDF5Recorder
+from .camera_bridge import CameraBridge
 
 app = FastAPI(title="Spot Dashboard API")
 
@@ -23,6 +25,7 @@ app.add_middleware(
 # Populated by start_dashboard_server()
 _state_manager: Optional[StateManager] = None
 _recorder: Optional[HDF5Recorder] = None
+_camera: Optional[CameraBridge] = None
 _recording_task_running = False
 
 
@@ -92,6 +95,41 @@ async def websocket_endpoint(websocket: WebSocket):
         pass
 
 
+# ─────────────────────────── MJPEG camera streams ─────────────────────
+
+async def _mjpeg_generator(key: str):
+    """Async generator: yields multipart JPEG frames at ~30 Hz."""
+    while True:
+        frame = _camera.get_frame(key) if _camera else None
+        if frame:
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            )
+        await asyncio.sleep(0.033)   # ~30 Hz
+
+
+@app.get("/api/camera/{key}")
+async def camera_stream(key: str):
+    if _camera is None:
+        return JSONResponse({"error": "camera bridge not started"}, status_code=503)
+    return StreamingResponse(
+        _mjpeg_generator(key),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/api/camera/{key}/snapshot")
+async def camera_snapshot(key: str):
+    """Single JPEG frame (for polling fallback)."""
+    if _camera is None:
+        return JSONResponse({"error": "camera bridge not started"}, status_code=503)
+    frame = _camera.get_frame(key)
+    if frame is None:
+        return JSONResponse({"error": f"no frame yet for '{key}'"}, status_code=404)
+    return StreamingResponse(io.BytesIO(frame), media_type="image/jpeg")
+
+
 # ─────────────────────────── Background recorder task ─────────────────
 
 def _recorder_drain_loop(state_manager: StateManager, recorder: HDF5Recorder):
@@ -110,15 +148,22 @@ def start_dashboard_server(
     state_manager: StateManager,
     recorder: HDF5Recorder,
     port: int = 8000,
+    enable_camera: bool = True,
 ) -> None:
     """Launch FastAPI server in a daemon background thread."""
-    global _state_manager, _recorder
+    global _state_manager, _recorder, _camera
     _state_manager = state_manager
     _recorder = recorder
 
     # Start HDF5 recorder session
     path = recorder.start_session()
     print(f"[Dashboard] HDF5 session: {path}")
+
+    # Start ROS2 camera bridge
+    if enable_camera:
+        _camera = CameraBridge()
+        _camera.start()
+        print(f"[Dashboard] Camera bridge started")
 
     # Start background drain loop
     drain_thread = threading.Thread(

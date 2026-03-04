@@ -78,7 +78,7 @@ class SpotRunner(object):
         self._world.add_physics_callback("spot_forward", callback_fn=self.on_physics_step)
 
         # Start dashboard server in background
-        start_dashboard_server(self._state_manager, self._recorder, port=8000)
+        start_dashboard_server(self._state_manager, self._recorder, port=8000, enable_camera=False)
 
     def on_physics_step(self, step_size) -> None:
         if self.first_step:
@@ -126,9 +126,11 @@ class SpotRunner(object):
         if event.type == carb.input.KeyboardEventType.KEY_PRESS:
             if event.input.name in self._input_keyboard_mapping:
                 self._base_command += np.array(self._input_keyboard_mapping[event.input.name])
+                print(f"[CMD] key={event.input.name:10s}  vx={self._base_command[0]:+.1f}  vy={self._base_command[1]:+.1f}  wz={self._base_command[2]:+.1f}")
         elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
             if event.input.name in self._input_keyboard_mapping:
                 self._base_command -= np.array(self._input_keyboard_mapping[event.input.name])
+                print(f"[CMD] release={event.input.name:10s} vx={self._base_command[0]:+.1f}  vy={self._base_command[1]:+.1f}  wz={self._base_command[2]:+.1f}")
         return True
 
 

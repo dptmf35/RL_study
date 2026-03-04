@@ -11,7 +11,7 @@
 
 ## Overview
 
-This project provides simulation applications, RL policy controllers, and a data collection dashboard for Boston Dynamics Spot in NVIDIA Isaac Sim. It supports keyboard teleoperation, autonomous navigation using hierarchical RL policies trained in Isaac Lab, and imitation learning data collection with a real-time web dashboard.
+This project provides simulation applications, RL policy controllers, and a data collection dashboard for Boston Dynamics Spot in NVIDIA Isaac Sim. It supports keyboard teleoperation, autonomous navigation using hierarchical RL policies trained in Isaac Lab, and imitation learning data collection with a real-time web dashboard including live camera feed monitoring.
 
 ---
 
@@ -21,8 +21,9 @@ This project provides simulation applications, RL policy controllers, and a data
 - Keyboard teleoperation in Isaac Sim
 - **Autonomous navigation** using a hierarchical policy (nav policy → locomotion policy)
 - **Data collection dashboard** — real-time web UI for recording teleoperation as HDF5 datasets
+- **Live camera monitoring** — MJPEG streams from ROS2 camera topics in the dashboard
 - Isaac Lab policy import — plug in your own `.pt` exported policies
-- Optional ROS 2 bridge integration
+- ROS 2 Humble integration via `isaacsim.ros2.bridge`
 
 ---
 
@@ -31,7 +32,8 @@ This project provides simulation applications, RL policy controllers, and a data
 - NVIDIA Isaac Sim 5.0 (standalone, path: `~/isaac-sim-standalone-5.0.0-linux-x86_64/`)
 - GPU: NVIDIA RTX 40xx or better
 - Node.js 18+ (for the dashboard frontend)
-- (Optional) ROS 2 Humble + rmw_zenoh
+- ROS 2 Humble (for camera monitoring)
+- System Python 3.10 (for `tools/camera_server.py` — must match ROS2 Humble's rclpy)
 
 ---
 
@@ -51,7 +53,19 @@ cd IsaacRobotics
     fastapi "uvicorn[standard]" h5py websockets
 ```
 
-### 3. Install dashboard frontend dependencies
+### 3. Install camera server dependencies (system Python 3.10)
+
+> The camera server must run with the system Python 3.10, not a conda environment,
+> because ROS 2 Humble's `rclpy` C extension is compiled for Python 3.10.
+
+```bash
+# Deactivate any conda environment first
+conda deactivate
+
+pip3 install Pillow numpy
+```
+
+### 4. Install dashboard frontend dependencies
 
 ```bash
 cd dashboard/frontend
@@ -80,11 +94,15 @@ IsaacRobotics/
 │   ├── spot.usd                        # Spot 12 DoF robot model
 │   └── spot_arm.usd                    # Spot Arm 19 DoF robot model
 │
+├── tools/
+│   └── camera_server.py                # Standalone MJPEG camera server (system Python 3.10)
+│
 ├── dashboard/
 │   ├── backend/
-│   │   ├── main.py                     # FastAPI server (WebSocket + REST)
+│   │   ├── main.py                     # FastAPI server (WebSocket + REST, port 8000)
 │   │   ├── recorder.py                 # HDF5 episode recorder
-│   │   └── state_bridge.py             # Thread-safe Isaac Sim ↔ FastAPI bridge
+│   │   ├── state_bridge.py             # Thread-safe Isaac Sim ↔ FastAPI bridge
+│   │   └── camera_bridge.py            # ROS2 camera subscriber (not used from Isaac Sim)
 │   └── frontend/                       # React + Vite dashboard UI
 │
 └── data/
@@ -95,7 +113,7 @@ IsaacRobotics/
 
 ## Applications
 
-All applications run through Isaac Sim's Python interpreter:
+All simulation applications run through Isaac Sim's Python interpreter:
 
 ```bash
 cd ~/isaac-sim-standalone-5.0.0-linux-x86_64
@@ -110,20 +128,28 @@ The original warehouse demo with Spot Arm (19 DoF).
 ./python.sh /home/yeseul/IsaacRobotics/applications/spot_warehouse.py
 ```
 
-### 2. `spot_warehouse_dashboard.py` — Teleoperation + Data Collection
+### 2. `spot_warehouse_dashboard.py` — Teleoperation + Data Collection + Camera
 
-Same as above, but with a live web dashboard for recording teleoperation episodes as HDF5 datasets for imitation learning.
+Teleoperation with a live web dashboard for recording episodes as HDF5 datasets and monitoring camera feeds.
 
 ```bash
-# Terminal 1: Isaac Sim
+# Terminal 1: Isaac Sim + FastAPI backend (port 8000)
+cd ~/isaac-sim-standalone-5.0.0-linux-x86_64
 ./python.sh /home/yeseul/IsaacRobotics/applications/spot_warehouse_dashboard.py
 
-# Terminal 2: React dev server
+# Terminal 2: Camera MJPEG server (port 8001) — system Python 3.10 with ROS2
+conda deactivate
+source /opt/ros/humble/setup.bash
+python3 /home/yeseul/IsaacRobotics/tools/camera_server.py
+
+# Terminal 3: React dev server
 cd /home/yeseul/IsaacRobotics/dashboard/frontend
 npm run dev
 ```
 
 Open `http://localhost:5173` in your browser.
+
+> **Note:** Click the Isaac Sim viewport window before using keyboard controls to give it keyboard focus.
 
 ### 3. `spot_nav_demo.py` — Teleoperation + Autonomous Navigation
 
@@ -185,7 +211,19 @@ FastAPI server (port 8000)
         │
         ▼
   data/recordings/session_YYYYMMDD_HHMMSS.h5
+
+ROS2 Camera Topics
+  │  (sensor_msgs/Image @ ~10 Hz)
+  ▼
+camera_server.py (port 8001, system Python 3.10)
+  │  JPEG encode via PIL
+  ▼
+MJPEG stream ──────────────► React frontend (📷 Camera tab)
 ```
+
+> **Why a separate camera server?**
+> Isaac Sim uses Python 3.11, but ROS 2 Humble's `rclpy` C extension is compiled for Python 3.10.
+> `tools/camera_server.py` runs separately under the system Python 3.10 to bridge this gap.
 
 ### Dashboard Tabs
 
@@ -194,15 +232,17 @@ FastAPI server (port 8000)
 | 🤖 Robot State | Real-time joint position/velocity graphs (19 joints), velocity command bars, robot pose |
 | 📹 Data Collection | Start/Stop recording button, episode list, file size |
 | 📊 Training Monitor | Placeholder (coming soon) |
+| 📷 Camera | Live MJPEG streams from `/scar/camera/frontleft/image` and `/scar/camera/frontright/image` |
 
 ### Recording an Episode
 
 1. Start Isaac Sim with `spot_warehouse_dashboard.py`
-2. Open `http://localhost:5173`
-3. Teleoperate Spot using keyboard (click the sim window first)
-4. Click **▶ Start Recording** in the dashboard
-5. Drive the robot — each timestep is buffered in memory
-6. Click **⏹ Stop Recording** — episode is flushed to HDF5
+2. Start `tools/camera_server.py` (system Python 3.10)
+3. Open `http://localhost:5173`
+4. Teleoperate Spot using keyboard (click the sim window first)
+5. Click **▶ Start Recording** in the dashboard
+6. Drive the robot — each timestep is buffered in memory
+7. Click **⏹ Stop Recording** — episode is flushed to HDF5
 
 ---
 

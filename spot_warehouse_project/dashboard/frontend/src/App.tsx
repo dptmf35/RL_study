@@ -4,13 +4,15 @@ import { useStatus } from './hooks/useApi'
 import RobotState from './tabs/RobotState'
 import DataCollection from './tabs/DataCollection'
 import TrainingMonitor from './tabs/TrainingMonitor'
+import CameraMonitor from './tabs/CameraMonitor'
 
-type Tab = 'robot' | 'data' | 'training'
+type Tab = 'robot' | 'data' | 'training' | 'camera'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'robot', label: '🤖 Robot State' },
   { id: 'data', label: '📹 Data Collection' },
   { id: 'training', label: '📊 Training Monitor' },
+  { id: 'camera', label: '📷 Camera' },
 ]
 
 export default function App() {
@@ -101,6 +103,9 @@ export default function App() {
         )}
         {activeTab === 'training' && (
           <TrainingMonitor />
+        )}
+        {activeTab === 'camera' && (
+          <CameraMonitor />
         )}
       </main>
     </div>
