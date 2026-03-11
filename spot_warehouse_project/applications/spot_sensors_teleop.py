@@ -96,13 +96,13 @@ class SpotSensorsTeleopRunner:
         self._base_command = cmd
 
     def _sub_keyboard_event(self, event, *args, **kwargs) -> bool:
-        key = event.input.name
+        key = event.input.name if hasattr(event.input, 'name') else event.input
         if event.type == carb.input.KeyboardEventType.KEY_PRESS:
             if key in self._dir_mapping:
                 self._held_keys.add(key)
                 self._recompute_command()
                 print(f"[CMD] vx={self._base_command[0]:+.1f}  vy={self._base_command[1]:+.1f}  wz={self._base_command[2]:+.1f}  speed={self._speed:.1f}")
-            elif key in ("EQUALS", "NUMPAD_ADD"):
+            elif key in ("EQUAL", "NUMPAD_ADD"):
                 self._speed = min(self._speed + self._speed_step, self._speed_max)
                 self._recompute_command()
                 print(f"[Speed] {self._speed:.1f} m/s")
